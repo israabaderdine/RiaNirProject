@@ -1906,7 +1906,7 @@ elif mode == "🔮 Predict":
         st.markdown(f"### 📊 Processing {len(nir_files)} file(s)")
         
         all_predictions = []
-        
+                
         for file in nir_files:
             with st.expander(f"📄 {file.name}", expanded=True):
                 spectrum, sn = parse_ias_5100(file)
@@ -1925,6 +1925,7 @@ elif mode == "🔮 Predict":
                             st.markdown("### 🎯 Predicted Values")
                             target_cols = st.session_state.model_data['target_cols']
                             cols = st.columns(len(target_cols))
+                            
                             for idx, col_name in enumerate(target_cols):
                                 with cols[idx]:
                                     if col_name in result_df.columns:
@@ -1935,8 +1936,13 @@ elif mode == "🔮 Predict":
                                             min_val=0,
                                             max_val=100
                                         )
-                                        st.plotly_chart(fig, use_container_width=True)
-                            
+                                        # FIX: Add unique key using file name and column name
+                                        st.plotly_chart(
+                                            fig, 
+                                            use_container_width=True,
+                                            key=f"gauge_{file.name}_{col_name}_{idx}"
+                                        )
+                                    
                             # Add to summary
                             prediction_row = result_df.copy()
                             prediction_row['File'] = file.name
