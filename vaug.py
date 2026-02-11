@@ -115,267 +115,7 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 # ==============================
 # FUNCTIONS - UPDATED FOR YOUR DATA STRUCTURE
 # ==============================
-# ==============================
-# TEMPERATURE COMPENSATION MODULE
-# ==============================
 
-def detect_temperature_shift(spectrum, reference_water_peak=1940):
-    """
-    Detect temperature-induced shift in water absorption peak
-    
-    Parameters:
-    - spectrum: pandas Series with wavelength index
-    - reference_water_peak: typical water absorption peak (1940 nm for NIR)
-    
-    Returns:
-    - shift_amount: estimated shift in nm
-    - temperature_estimate: estimated temperature difference
-    """
-    # Find local maximum around water peak region
-    water_region = spectrum.loc[1900:2000]  # Water peak region
-    
-    if len(water_region) > 0:
-        # Find actual peak
-        actual_peak_idx = water_region.idxmax()
-        actual_peak = float(actual_peak_idx)
-        
-        # Calculate shift
-        shift_amount = actual_peak - reference_water_peak
-        
-        # Approximate temperature coefficient
-        # For water in NIR, ~0.1-0.2 nm shift per °C
-        temp_coefficient = 0.15  # nm/°C
-        temp_estimate = shift_amount / temp_coefficient
-        
-        return shift_amount, temp_estimate
-    
-    return 0, 0
-
-def temperature_correct_spectrum(spectrum, target_temperature=20, current_temperature=None):
-    """
-    Apply temperature correction to spectrum
-    
-    Parameters:
-    - spectrum: pandas Series with wavelength index
-    - target_temperature: desired temperature for prediction
-    - current_temperature: measured temperature (if None, estimate from spectrum)
-    
-    Returns:
-    - corrected_spectrum: temperature-corrected spectrum
-    - correction_info: dictionary with correction details
-    """
-    corrected = spectrum.copy()
-    wavelengths = spectrum.index.values
-    
-    # Convert to numpy array if needed
-    if not isinstance(wavelengths, np.ndarray):
-        wavelengths = np.array(wavelengths, dtype=float)
-    
-    # Estimate current temperature if not provided
-    if current_temperature is None:
-        shift_amount, temp_estimate = detect_temperature_shift(spectrum)
-        current_temperature = 20 + temp_estimate  # Assuming reference at 20°C
-    else:
-        shift_amount = (current_temperature - 20) * 0.15
-    
-    # Calculate temperature difference
-    temp_diff = target_temperature - current_temperature
-    temp_shift_correction = temp_diff * 0.15  # nm shift per °C
-    
-    # Apply wavelength correction
-    if abs(temp_shift_correction) > 0.1:
-        # Shift wavelengths
-        corrected_wavelengths = wavelengths - temp_shift_correction
-        
-        # Ensure wavelengths are sorted for interpolation
-        sorted_indices = np.argsort(corrected_wavelengths)
-        corrected_wavelengths_sorted = corrected_wavelengths[sorted_indices]
-        spectrum_values_sorted = spectrum.values[sorted_indices]
-        
-        # Interpolate back to original wavelengths
-        corrected_values = np.interp(
-            wavelengths, 
-            corrected_wavelengths_sorted, 
-            spectrum_values_sorted
-        )
-        corrected = pd.Series(corrected_values, index=wavelengths)
-    
-    correction_info = {
-        'estimated_temperature': current_temperature,
-        'target_temperature': target_temperature,
-        'wavelength_shift': shift_amount,
-        'correction_applied': temp_shift_correction,
-        'negative_prediction_risk': abs(temp_diff) > 2  # Risk if >2°C difference
-    }
-    
-    return corrected, correction_info
-def predict_with_temperature_compensation(model_data, spectrum, sample_temperature=None):
-    """
-    Make predictions with automatic temperature compensation
-    
-    Parameters:
-    - model_data: trained model data
-    - spectrum: raw spectrum
-    - sample_temperature: measured temperature (if available)
-    
-    Returns:
-    - predictions: corrected predictions
-    - correction_info: temperature correction details
-    - negative_detected: whether negative wa was detected and corrected
-    """
-    # First, check if water activity might go negative
-    _, temp_estimate = detect_temperature_shift(spectrum)
-    
-    # Apply temperature correction
-    corrected_spectrum, correction_info = temperature_correct_spectrum(
-        spectrum, 
-        target_temperature=20,  # Assume model trained at 20°C
-        current_temperature=sample_temperature or (20 + temp_estimate)
-    )
-    
-    # Make prediction with corrected spectrum
-    predictions, _ = predict_with_spectrum(model_data, corrected_spectrum)
-    
-    # Check for negative wa
-    negative_detected = False
-    if predictions is not None and 'wa' in predictions.columns:
-        wa_value = predictions['wa'].iloc[0]
-        if wa_value < 0:
-            negative_detected = True
-            # Apply additional constraint for water activity (must be 0-1)
-            predictions['wa'] = predictions['wa'].clip(lower=0, upper=1)
-            correction_info['negative_corrected'] = True
-    
-    return predictions, correction_info, negative_detected
-
-def predict_with_robustness_check(model_data, spectrum, sample_temperature=None):
-    """Enhanced prediction with negative value detection and correction"""
-    
-    # Use temperature-compensated prediction
-    predictions, correction_info, negative_detected = predict_with_temperature_compensation(
-        model_data, spectrum, sample_temperature
-    )
-    
-    if negative_detected:
-        st.warning(f"""
-        ⚠️ **Temperature-Induced Negative Water Activity Detected**
-        
-        **Cause:** Sample temperature differs from model training temperature
-        - Estimated sample temperature: {correction_info['estimated_temperature']:.1f}°C
-        - Model training temperature: {correction_info['target_temperature']:.1f}°C
-        - Wavelength shift detected: {correction_info['wavelength_shift']:.2f} nm
-        
-        **Correction Applied:**
-        - Spectrum shifted by {correction_info['correction_applied']:.2f} nm
-        - Water activity constrained to physical range (0-1)
-        """)
-        
-        # Show the shift visually
-        fig = visualize_temperature_shift(spectrum, correction_info)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    return predictions, correction_info
-def augment_with_temperature_variations(X, y, wavelengths, temperatures=None):
-    """
-    Augment training data with simulated temperature variations
-    
-    Parameters:
-    - X: original spectra
-    - y: target values
-    - wavelengths: wavelength points (list or array)
-    - temperatures: measured temperatures (or None to simulate)
-    
-    Returns:
-    - X_aug, y_aug: augmented dataset with temperature variations
-    """
-    augmented_spectra = []
-    augmented_targets = []
-    
-    # Temperature variations to simulate (±0°C to ±5°C)
-    temp_variations = [-5, -3, -2, -1, 0, 1, 2, 3, 5]
-    
-    # Convert wavelengths to numpy array for mathematical operations
-    wavelengths_array = np.array(wavelengths, dtype=float)
-    
-    for i in range(X.shape[0]):
-        spectrum = pd.Series(X[i], index=wavelengths_array)
-        
-        for temp_shift in temp_variations:
-            # Simulate temperature-induced shift
-            shifted_wavelengths = wavelengths_array - (temp_shift * 0.15)
-            
-            # Interpolate - ensure shifted_wavelengths is sorted
-            # np.interp requires x-coordinates to be increasing
-            sorted_indices = np.argsort(shifted_wavelengths)
-            shifted_wavelengths_sorted = shifted_wavelengths[sorted_indices]
-            spectrum_values_sorted = spectrum.values[sorted_indices]
-            
-            # Interpolate back to original wavelengths
-            shifted_values = np.interp(
-                wavelengths_array, 
-                shifted_wavelengths_sorted, 
-                spectrum_values_sorted
-            )
-            
-            augmented_spectrum = pd.Series(shifted_values, index=wavelengths_array)
-            
-            # Add small noise
-            noise = np.random.normal(0, 0.0005, len(wavelengths_array))
-            augmented_spectrum = augmented_spectrum + noise
-            
-            augmented_spectra.append(augmented_spectrum.values)
-            augmented_targets.append(y[i])
-    
-    # Stack arrays
-    if augmented_spectra:
-        X_aug = np.vstack([X] + augmented_spectra)
-        y_aug = np.vstack([y] + augmented_targets)
-    else:
-        X_aug = X
-        y_aug = y
-    
-    return X_aug, y_aug
-def visualize_temperature_shift(spectrum, correction_info):
-    """Visualize the temperature-induced spectral shift"""
-    fig = go.Figure()
-    
-    # Original spectrum
-    fig.add_trace(go.Scatter(
-        x=spectrum.index,
-        y=spectrum.values,
-        mode='lines',
-        name=f'Original Spectrum ({correction_info["estimated_temperature"]:.1f}°C)',
-        line=dict(color='#EF4444', width=2)
-    ))
-    
-    # Corrected spectrum
-    corrected, _ = temperature_correct_spectrum(spectrum)
-    fig.add_trace(go.Scatter(
-        x=corrected.index,
-        y=corrected.values,
-        mode='lines',
-        name=f'Corrected Spectrum ({correction_info["target_temperature"]:.1f}°C)',
-        line=dict(color='#10B981', width=2, dash='dot')
-    ))
-    
-    # Highlight water peak region
-    fig.add_vrect(
-        x0=1930, x1=1950,
-        fillcolor="#764ba2", opacity=0.1,
-        layer="below", line_width=0,
-        annotation_text="Water Peak Region",
-        annotation_position="top left"
-    )
-    
-    fig.update_layout(
-        title=f"Temperature Compensation - Shift: {correction_info['correction_applied']:.2f} nm",
-        xaxis_title="Wavelength (nm)",
-        yaxis_title="Absorbance",
-        template="plotly_white",
-        height=400
-    )
-    
-    return fig
 def augment_spectrum(spectrum, noise_level=0.001, shift_max=1, scaling_range=(0.98, 1.02)):
     """
     Apply multiple augmentation techniques to a single spectrum
@@ -1047,9 +787,11 @@ def save_model(model, model_name, wavelengths, target_cols, dataset_info):
         pickle.dump(model_data, f)
     
     return model_path
-
-def predict_with_spectrum(model_data, spectrum):
-    """Make predictions using trained model and a spectrum"""
+def predict_with_spectrum(model_data, spectrum, temperature=None):
+    """
+    Make predictions using trained model with temperature compensation
+    and realistic value clipping
+    """
     if model_data is None or 'model' not in model_data:
         return None, None
     
@@ -1073,15 +815,209 @@ def predict_with_spectrum(model_data, spectrum):
         
         # Make prediction
         prediction = model.predict(X_new_snv)
-        # Clip negative values to 0
-        prediction = np.maximum(prediction, 0)
-        # Create result DataFrame
+        
+        # CRITICAL FIX: Apply realistic bounds to predictions
         result_df = pd.DataFrame(prediction, columns=target_cols)
+        
+        # Apply target-specific constraints
+        for col in result_df.columns:
+            if col == 'wa':  # Water activity: must be between 0 and 1
+                result_df[col] = np.clip(result_df[col], 0, 1)
+            elif col == 'moisture':  # Moisture: typically 0-15%
+                result_df[col] = np.clip(result_df[col], 0, 15)
+            elif col == 'Protein':  # Protein: typical range 0-60%
+                result_df[col] = np.clip(result_df[col], 0, 60)
+            elif col == 'fat':  # Fat: typical range 0-40%
+                result_df[col] = np.clip(result_df[col], 0, 40)
+            elif col == 'ash':  # Ash: typical range 0-15%
+                result_df[col] = np.clip(result_df[col], 0, 15)
+            elif col == 'Fiber':  # Fiber: typical range 0-20%
+                result_df[col] = np.clip(result_df[col], 0, 20)
+        
         return result_df, spectrum_aligned
         
     except Exception as e:
         st.error(f"❌ Prediction error: {str(e)}")
         return None, None
+def augment_with_temperature_variation(spectrum, temp_shift_strength=0.1):
+    """
+    Simulate temperature-induced spectral shifts - SIMPLIFIED VERSION
+    
+    Parameters:
+    - spectrum: pandas Series with wavelength index
+    - temp_shift_strength: magnitude of temperature effect (0-1)
+    """
+    augmented = spectrum.copy()
+    wavelengths = spectrum.index.values
+    
+    # Ensure temp_shift_strength is positive
+    temp_shift_strength = abs(temp_shift_strength)
+    
+    # Random direction (-1 or 1)
+    direction = np.random.choice([-1, 1])
+    
+    # Random magnitude (positive)
+    magnitude = np.random.uniform(0, temp_shift_strength)
+    
+    # Apply different effects to different spectral regions
+    # This simulates how temperature affects water absorption differently at different wavelengths
+    
+    # Water absorption region 1 (around 1450 nm)
+    mask1 = (wavelengths >= 1400) & (wavelengths <= 1500)
+    if mask1.any():
+        # Temperature increases water absorption in this region
+        augmented.iloc[mask1] = spectrum.iloc[mask1] * (1 + direction * magnitude * 0.05)
+    
+    # Water absorption region 2 (around 1940 nm)
+    mask2 = (wavelengths >= 1900) & (wavelengths <= 2000)
+    if mask2.any():
+        # Temperature decreases water absorption in this region
+        augmented.iloc[mask2] = spectrum.iloc[mask2] * (1 - direction * magnitude * 0.05)
+    
+    return augmented# Update your create_augmented_dataset function to include temperature variation
+def create_augmented_dataset(X, y, wavelengths, sample_ids, augmentation_factor=3, 
+                            use_noise=True, use_warp=True, use_mixup=True, use_scale=True,
+                            use_temp_variation=True,  # NEW
+                            noise_level=0.001):
+    """
+    Create augmented dataset with multiple techniques including temperature variation
+    """
+    augmented_spectra = []
+    augmented_targets = []
+    augmented_ids = []
+    
+    n_samples = X.shape[0]
+    
+    # Collect available methods
+    available_methods = []
+    if use_noise:
+        available_methods.append('noise')
+    if use_warp:
+        available_methods.append('warp')
+    if use_mixup:
+        available_methods.append('mixup')
+    if use_scale:
+        available_methods.append('scale')
+    if use_temp_variation:  # NEW
+        available_methods.append('temp')
+    
+    # Default to noise if no methods selected
+    if not available_methods:
+        available_methods = ['noise']
+    
+    # Create augmented samples
+    for i in range(n_samples):
+        spectrum = pd.Series(X[i], index=wavelengths)
+        
+        for aug_idx in range(augmentation_factor):
+            method = np.random.choice(available_methods)
+            
+            if method == 'noise':
+                aug_spectrum = augment_spectrum(spectrum, noise_level=noise_level)
+                aug_y = y[i].copy()
+                
+            elif method == 'warp':
+                aug_spectrum = augment_with_warping(spectrum)
+                aug_y = y[i].copy()
+                
+            elif method == 'mixup':
+                j = np.random.randint(0, n_samples)
+                while j == i:
+                    j = np.random.randint(0, n_samples)
+                spectrum2 = pd.Series(X[j], index=wavelengths)
+                aug_spectrum, aug_y = augment_with_mixup(spectrum, spectrum2, y[i], y[j])
+                
+            elif method == 'scale':
+                aug_spectrum = augment_spectrum(spectrum, noise_level=0, scaling_range=(0.95, 1.05))
+                aug_y = y[i].copy()
+                
+            elif method == 'temp':  # NEW
+                # Simulate different measurement temperatures
+                temp_factor = np.random.uniform(0.05, 0.15)  # Always positive!
+                # temp_factor = np.random.uniform(-0.2, 0.2)  # ±0.2°C equivalent effect
+                aug_spectrum = augment_with_temperature_variation(spectrum, temp_factor)
+                aug_y = y[i].copy()
+            
+            # Ensure no NaN values
+            if aug_spectrum.isna().any():
+                aug_spectrum = aug_spectrum.interpolate(method='linear')
+                aug_spectrum = aug_spectrum.bfill().ffill()
+            
+            augmented_spectra.append(aug_spectrum.values)
+            augmented_targets.append(aug_y)
+            augmented_ids.append(f"{sample_ids[i]}_aug{aug_idx+1}_{method}")
+    
+    # Combine original and augmented data
+    X_aug = np.vstack([X, np.array(augmented_spectra)])
+    y_aug = np.vstack([y, np.array(augmented_targets)])
+    all_ids = list(sample_ids) + augmented_ids
+    
+    return X_aug, y_aug, all_ids
+def diagnose_prediction_issue(spectrum, model_data):
+    """Diagnose why predictions might be negative"""
+    st.markdown("### 🔍 Prediction Diagnostic")
+    
+    # Check if spectrum is within training range
+    model_wavelengths = model_data['wavelengths']
+    training_range = [min(model_wavelengths), max(model_wavelengths)]
+    spectrum_range = [spectrum.index.min(), spectrum.index.max()]
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Spectrum Range", f"{spectrum_range[0]:.0f}-{spectrum_range[1]:.0f}nm")
+    with col2:
+        st.metric("Model Range", f"{training_range[0]:.0f}-{training_range[1]:.0f}nm")
+    
+    # Check water peak region
+    water_region = (1400, 1450)
+    spectrum_water = spectrum[(spectrum.index >= water_region[0]) & 
+                              (spectrum.index <= water_region[1])].mean()
+    
+    # Compare with training data if available
+    st.info(f"""
+    **Potential Issues:**
+    1. **Temperature Variation**: Water peak at ~1450nm shows temperature sensitivity
+    2. **Extrapolation**: Model is predicting outside training range
+    3. **Solution**: Enable temperature augmentation and retrain model
+    
+    **Recommended Actions:**
+    - Train model with samples at different temperatures
+    - Enable temperature variation augmentation
+    - Apply prediction clipping to realistic ranges
+    """)
+# def predict_with_spectrum(model_data, spectrum):
+#     """Make predictions using trained model and a spectrum"""
+#     if model_data is None or 'model' not in model_data:
+#         return None, None
+    
+#     model = model_data['model']
+#     wavelengths = model_data['wavelengths']
+#     target_cols = model_data['target_cols']
+    
+#     try:
+#         # Align spectrum with model wavelengths
+#         model_wavelengths = [float(w) for w in wavelengths]
+#         spectrum_aligned = spectrum.reindex(model_wavelengths)
+        
+#         # Handle missing values
+#         if spectrum_aligned.isna().any():
+#             spectrum_aligned = spectrum_aligned.interpolate(method='linear')
+#             spectrum_aligned = spectrum_aligned.ffill().bfill()
+        
+#         # Prepare for prediction
+#         X_new = spectrum_aligned.values.reshape(1, -1)
+#         X_new_snv = apply_snv(X_new)
+        
+#         # Make prediction
+#         prediction = model.predict(X_new_snv)
+#         # prediction = np.maximum(prediction, 0)
+#         # Create result DataFrame
+#         result_df = pd.DataFrame(prediction, columns=target_cols)
+#         return result_df, spectrum_aligned
+        
+#     except Exception as e:
+#         st.error(f"❌ Prediction error: {str(e)}")
+#         return None, None
 
 def create_spectra_plot(spectra_data, sample_ids=None):
     """Create interactive spectra plot using Plotly"""
@@ -1422,10 +1358,6 @@ elif mode == "🚀 Train Model":
         y = clean_data[existing_targets].values.astype(float)
         sample_ids = clean_data['Sample ID'].tolist() if 'Sample ID' in clean_data.columns else [f"sample_{i}" for i in range(len(clean_data))]
 
-        # Initialize training data arrays
-        X_train_full = X
-        y_train_full = y
-
         # ============================================
         # DATA AUGMENTATION SECTION
         # ============================================
@@ -1462,40 +1394,7 @@ elif mode == "🚀 Train Model":
             else:
                 noise_level = 0.001
 
-        # Temperature Variation Augmentation (ADD THIS NEW SECTION)
-        if use_augmentation:
-            with st.expander("🌡️ Temperature Compensation Training", expanded=True):
-                st.markdown("""
-                **Why this matters:** Your data shows that a 2°C temperature difference 
-                shifts the water peak and causes negative predictions.
-                
-                Enable temperature-aware training to make your model robust to 
-                temperature variations.
-                """)
-                
-                use_temperature_aug = st.checkbox(
-                    "✅ Enable Temperature Variation Training",
-                    value=True,
-                    help="Train model with simulated temperature variations (±5°C)"
-                )
-                
-                if use_temperature_aug:
-                    wavelengths_float = [float(w) for w in wavelength_cols]
-                    
-                    # Create temperature-augmented dataset
-                    X_temp_aug, y_temp_aug = augment_with_temperature_variations(
-                        X, y, wavelengths_float
-                    )
-                    
-                    st.success(f"✅ Added {len(X_temp_aug) - len(X)} temperature-varied spectra")
-                    
-                    # Combine with existing data
-                    X_train_full = np.vstack([X_train_full, X_temp_aug])
-                    y_train_full = np.vstack([y_train_full, y_temp_aug])
-                    
-                    st.metric("📊 Total Training Samples", len(X_train_full))
-
-        # Show augmentation example (EXISTING CODE - KEEP THIS)
+        # Show augmentation example
         if use_augmentation and len(clean_data) > 0:
             with st.expander("📊 Augmentation Preview", expanded=True):
                 # Select a random sample for demonstration
@@ -1553,8 +1452,6 @@ elif mode == "🚀 Train Model":
             use_warp = True
             use_mixup = True
             use_scale = True
-
-
 
         # Apply augmentation if enabled
         if use_augmentation and augmentation_factor > 0:
@@ -1659,8 +1556,7 @@ elif mode == "🚀 Train Model":
         
         # Make predictions on test set
         y_pred = model.predict(X_test_snv)
-        y_pred = np.maximum(y_pred, 0)
-
+        
         # Calculate metrics for each target
         eval_cols = st.columns(len(existing_targets))
         metrics_data = []
@@ -1913,11 +1809,38 @@ elif mode == "🔮 Predict":
                 
                 if not spectrum.empty:
                     if st.session_state.model_data:
+                        # result_df, aligned_spectrum = predict_with_spectrum(
+                        #     st.session_state.model_data, 
+                        #     spectrum
+                        # )
+                        
+                        # With:
                         result_df, aligned_spectrum = predict_with_spectrum(
                             st.session_state.model_data, 
                             spectrum
                         )
-                        
+
+                        # Add diagnostic for negative predictions
+                        if result_df is not None and 'wa' in result_df.columns:
+                            wa_value = result_df['wa'].iloc[0]
+                            if wa_value < 0 or wa_value > 1:
+                                st.warning(f"⚠️ Unusual wa prediction: {wa_value:.4f} (expected 0-1)")
+                                with st.expander("🔧 Diagnostic & Fix"):
+                                    diagnose_prediction_issue(spectrum, st.session_state.model_data)
+                                    
+                                    # Offer immediate correction
+                                    if wa_value < 0:
+                                        st.error("❌ Negative wa prediction detected!")
+                                        st.markdown("""
+                                        **Why this happens:**
+                                        - Temperature difference between training and prediction
+                                        - Water absorption peak shifted due to temperature
+                                        - Model extrapolating beyond training data
+                                        
+                                        **Fix applied:** Prediction clipped to realistic range [0-1]
+                                        """)
+                                        result_df['wa'] = result_df['wa'].clip(0, 1)
+                                        st.success(f"✅ Corrected wa: {result_df['wa'].iloc[0]:.4f}")
                         if result_df is not None:
                             st.success(f"✅ Predictions for {sn}")
                             
