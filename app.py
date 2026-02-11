@@ -115,7 +115,230 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 # ==============================
 # FUNCTIONS - UPDATED FOR YOUR DATA STRUCTURE
 # ==============================
-def parse_ias_5100(file):
+
+def augment_spectrum(spectrum, noise_level=0.001, shift_max=1, scaling_range=(0.98, 1.02)):
+    """
+    Apply multiple augmentation techniques to a single spectrum
+    
+    Parameters:
+    - spectrum: pandas Series with wavelength index
+    - noise_level: standard deviation of Gaussian noise
+    - shift_max: maximum wavelength shift in nm
+    - scaling_range: min/max for multiplicative scaling
+    """
+    augmented = spectrum.copy()
+    
+    # 1. Add Gaussian noise
+    if noise_level > 0:
+        noise = np.random.normal(0, noise_level, len(spectrum))
+        augmented = augmented + noise
+    
+    # 2. Multiplicative scaling
+    scale_factor = np.random.uniform(scaling_range[0], scaling_range[1])
+    augmented = augmented * scale_factor
+    
+    # 3. Baseline shift
+    baseline_shift = np.random.normal(0, noise_level * 10)
+    augmented = augmented + baseline_shift
+    
+    return augmented
+
+def augment_with_warping(spectrum, warp_factor=0.01):
+    """
+    Apply wavelength warping (small shifts in wavelength domain)
+    """
+    wavelengths = spectrum.index.values
+    new_wavelengths = wavelengths * (1 + np.random.uniform(-warp_factor, warp_factor))
+    
+    # Interpolate back to original wavelengths
+    warped_spectrum = pd.Series(
+        np.interp(wavelengths, new_wavelengths, spectrum.values),
+        index=wavelengths
+    )
+    
+    return warped_spectrum
+def augment_with_mixup(spectrum1, spectrum2, y1, y2, alpha=0.2):
+    """
+    MixUp augmentation: create weighted combination of two spectra and their labels
+    
+    Parameters:
+    - spectrum1, spectrum2: pandas Series with wavelength index
+    - y1, y2: target values for each spectrum
+    - alpha: Beta distribution parameter
+    """
+    lambda_val = np.random.beta(alpha, alpha)
+    
+    # Mix spectra
+    mixed_spectrum = lambda_val * spectrum1 + (1 - lambda_val) * spectrum2
+    
+    # Mix labels
+    mixed_y = lambda_val * y1 + (1 - lambda_val) * y2
+    
+    return mixed_spectrum, mixed_y
+
+def augment_with_warping(spectrum, warp_factor=0.01):
+    """
+    Apply wavelength warping (small shifts in wavelength domain)
+    """
+    wavelengths = spectrum.index.values
+    new_wavelengths = wavelengths * (1 + np.random.uniform(-warp_factor, warp_factor))
+    
+    # Interpolate back to original wavelengths
+    warped_spectrum = pd.Series(
+        np.interp(wavelengths, new_wavelengths, spectrum.values),
+        index=wavelengths
+    )
+    
+    return warped_spectrum
+def create_augmented_dataset(X, y, wavelengths, sample_ids, augmentation_factor=3, 
+                            use_noise=True, use_warp=True, use_mixup=True, use_scale=True,
+                            noise_level=0.001):
+    """
+    Create augmented dataset with multiple techniques
+    
+    Parameters:
+    - X: original spectra matrix (n_samples, n_features)
+    - y: target values matrix (n_samples, n_targets)
+    - wavelengths: list of wavelength values
+    - sample_ids: list of sample IDs
+    - augmentation_factor: multiplier for dataset size
+    - use_noise: whether to use noise augmentation
+    - use_warp: whether to use wavelength warping
+    - use_mixup: whether to use MixUp augmentation
+    - use_scale: whether to use scaling augmentation
+    - noise_level: standard deviation for Gaussian noise
+    
+    Returns:
+    - X_aug, y_aug, augmented_ids
+    """
+    augmented_spectra = []
+    augmented_targets = []
+    augmented_ids = []
+    
+    n_samples = X.shape[0]
+    n_targets = y.shape[1] if len(y.shape) > 1 else 1
+    
+    # Collect available methods
+    available_methods = []
+    if use_noise:
+        available_methods.append('noise')
+    if use_warp:
+        available_methods.append('warp')
+    if use_mixup:
+        available_methods.append('mixup')
+    if use_scale:
+        available_methods.append('scale')
+    
+    # Default to noise if no methods selected
+    if not available_methods:
+        available_methods = ['noise']
+    
+    # Create augmented samples
+    for i in range(n_samples):
+        # Original spectrum as Series
+        spectrum = pd.Series(X[i], index=wavelengths)
+        
+        # Create multiple augmented versions
+        for aug_idx in range(augmentation_factor):
+            # Randomly choose augmentation method
+            method = np.random.choice(available_methods)
+            
+            if method == 'noise':
+                aug_spectrum = augment_spectrum(
+                    spectrum, 
+                    noise_level=noise_level
+                )
+                aug_y = y[i].copy()
+                
+            elif method == 'warp':
+                aug_spectrum = augment_with_warping(
+                    spectrum,
+                    warp_factor=np.random.uniform(0.005, 0.02)
+                )
+                aug_y = y[i].copy()
+                
+            elif method == 'mixup':
+                # Mix with another random sample
+                j = np.random.randint(0, n_samples)
+                while j == i:
+                    j = np.random.randint(0, n_samples)
+                
+                spectrum2 = pd.Series(X[j], index=wavelengths)
+                aug_spectrum, aug_y = augment_with_mixup(
+                    spectrum, spectrum2,
+                    y[i], y[j],
+                    alpha=0.2
+                )
+                
+            elif method == 'scale':
+                # Scaling augmentation
+                aug_spectrum = augment_spectrum(
+                    spectrum,
+                    noise_level=0,  # No noise
+                    scaling_range=(0.95, 1.05)
+                )
+                aug_y = y[i].copy()
+            
+            # Ensure no NaN values
+            if aug_spectrum.isna().any():
+                aug_spectrum = aug_spectrum.interpolate(method='linear')
+                aug_spectrum = aug_spectrum.bfill().ffill()
+            
+            augmented_spectra.append(aug_spectrum.values)
+            augmented_targets.append(aug_y)
+            augmented_ids.append(f"{sample_ids[i]}_aug{aug_idx+1}")
+    
+    # Combine original and augmented data
+    X_aug = np.vstack([X, np.array(augmented_spectra)])
+    y_aug = np.vstack([y, np.array(augmented_targets)])
+    all_ids = list(sample_ids) + augmented_ids
+    
+    return X_aug, y_aug, all_ids
+
+def plot_augmentation_example(original_spectrum, augmented_spectra, sample_id):
+    """Plot original vs augmented spectra for visualization"""
+    fig = go.Figure()
+    
+    # Original spectrum
+    fig.add_trace(go.Scatter(
+        x=original_spectrum.index,
+        y=original_spectrum.values,
+        mode='lines',
+        name=f'Original {sample_id}',
+        line=dict(color='#764ba2', width=3)
+    ))
+    
+    # Augmented spectra
+    colors = ['#10B981', '#F59E0B', '#EF4444', '#3B82F6']
+    for idx, (name, aug_spec) in enumerate(augmented_spectra.items()):
+        fig.add_trace(go.Scatter(
+            x=aug_spec.index,
+            y=aug_spec.values,
+            mode='lines',
+            name=name,
+            line=dict(color=colors[idx % len(colors)], width=1.5, dash='dot'),
+            opacity=0.7
+        ))
+    
+    fig.update_layout(
+        title=f"Data Augmentation Example - {sample_id}",
+        xaxis_title="Wavelength (nm)",
+        yaxis_title="Absorbance",
+        template="plotly_white",
+        hovermode='x unified',
+        height=500
+    )
+    
+    return fig
+
+
+
+
+
+
+
+
+def parse_ias_5100(file, duplicate_counter=None):
     """Parse IAS 5100 CSV file - extract Sample ID and spectrum data"""
     try:
         content = file.getvalue().decode("utf-8").splitlines()
@@ -210,15 +433,20 @@ def parse_ias_5100(file):
             # Create spectrum series
             spectrum = df.set_index('Wavelength')['Absorbance']
             
-            st.success(f"✅ {file_name}: ID={sample_id}, Points={len(spectrum)}, Range={spectrum.index.min()}-{spectrum.index.max()}nm")
-            return spectrum, sample_id
+            # Apply duplicate suffix if provided
+            display_id = sample_id
+            if duplicate_counter and duplicate_counter > 1:
+                display_id = f"{sample_id}_dup{duplicate_counter}"
+                st.info(f"📝 Duplicate sample ID '{sample_id}' found. Using '{display_id}' for this spectrum.")
+            
+            st.success(f"✅ {file_name}: ID={display_id}, Points={len(spectrum)}, Range={spectrum.index.min():.0f}-{spectrum.index.max():.0f}nm")
+            return spectrum, display_id
         
         return pd.Series(), sample_id
         
     except Exception as e:
         st.error(f"❌ Error parsing file {file_name}: {str(e)}")
         return pd.Series(), file_name
-
 def load_lab_data(lab_file):
     """Load lab data with support for both CSV and tab-delimited files"""
     try:
@@ -855,7 +1083,6 @@ if mode == "🏠 Dashboard":
         - View model metadata
         - Compare model performance
         """)
-
 elif mode == "🚀 Train Model":
     st.markdown("<h1>🚀 Train New Model</h1>", unsafe_allow_html=True)
     
@@ -873,29 +1100,33 @@ elif mode == "🚀 Train Model":
         progress_bar = st.progress(0)
 
         spectra_dict = {}
-        duplicate_count = {}
+        duplicate_counter = {}  # Track duplicates per sample ID
 
         for idx, file in enumerate(nir_files):
             with st.spinner(f"Parsing {file.name}..."):
-                spectrum, sn = parse_ias_5100(file)
-                if not spectrum.empty:
-                    # Count duplicates
-                    if sn in duplicate_count:
-                        duplicate_count[sn] += 1
-                        # Create a unique key for the duplicate
-                        unique_key = f"{sn}_dup{duplicate_count[sn]}"
-                        spectra_dict[unique_key] = spectrum
-                        st.info(f"📝 Duplicate sample ID '{sn}' found. Using '{unique_key}' for this spectrum.")
+                # Check if this sample ID already exists
+                # First parse without storing to get the base ID
+                temp_spectrum, temp_id = parse_ias_5100(file)
+                
+                if not temp_spectrum.empty:
+                    base_id = re.sub(r'_dup\d+$', '', temp_id)  # Remove any existing _dup suffix
+                    
+                    # Update counter for this base ID
+                    if base_id in duplicate_counter:
+                        duplicate_counter[base_id] += 1
                     else:
-                        duplicate_count[sn] = 1
-                        spectra_dict[sn] = spectrum
+                        duplicate_counter[base_id] = 1
+                    
+                    # Now parse with the correct duplicate counter
+                    spectrum, unique_id = parse_ias_5100(file, duplicate_counter[base_id])
+                    spectra_dict[unique_id] = spectrum
+                
             progress_bar.progress((idx + 1) / len(nir_files))
 
         # Count total duplicates
-        total_duplicates = sum(count - 1 for count in duplicate_count.values() if count > 1)
+        total_duplicates = sum(count - 1 for count in duplicate_counter.values() if count > 1)
         if total_duplicates > 0:
-            st.warning(f"⚠️ Found {total_duplicates} duplicate sample IDs. Each spectrum will be used separately for training.")
-        
+            st.warning(f"⚠️ Found {total_duplicates} duplicate sample IDs. Each spectrum will be used separately for training with _dup suffix.")
         if len(spectra_dict) == 0:
             st.error("❌ No valid spectra found!")
             st.stop()
@@ -920,118 +1151,450 @@ elif mode == "🚀 Train Model":
         existing_targets = [col for col in TARGET_COLS if col in clean_data.columns]
         numeric_cols = clean_data.select_dtypes(include=[np.number]).columns.tolist()
         wavelength_cols = [col for col in numeric_cols if col not in existing_targets + ['Sample ID']]
-        
+
         # Check if we have enough data
         if len(clean_data) < 2:
             st.error(f"❌ Not enough samples for training. Only {len(clean_data)} samples available.")
             st.stop()
-        
+
         X = clean_data[wavelength_cols].values.astype(float)
         y = clean_data[existing_targets].values.astype(float)
-        
+        sample_ids = clean_data['Sample ID'].tolist() if 'Sample ID' in clean_data.columns else [f"sample_{i}" for i in range(len(clean_data))]
+
+        # ============================================
+        # DATA AUGMENTATION SECTION
+        # ============================================
+        st.markdown("### 🔬 Data Augmentation")
+        st.markdown("Enhance your dataset with synthetic spectra to improve model robustness")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            use_augmentation = st.checkbox("✅ Enable Data Augmentation", value=False, key="use_aug")
+            
+        with col2:
+            if use_augmentation:
+                augmentation_factor = st.slider(
+                    "Augmentation Multiplier",
+                    min_value=1,
+                    max_value=20,
+                    value=5,
+                    help="Number of synthetic spectra to generate per original sample"
+                )
+            else:
+                augmentation_factor = 0
+                
+        with col3:
+            if use_augmentation:
+                noise_level = st.slider(
+                    "Noise Level",
+                    min_value=0.0001,
+                    max_value=0.01,
+                    value=0.001,
+                    format="%.4f",
+                    help="Standard deviation of Gaussian noise"
+                )
+            else:
+                noise_level = 0.001
+
+        # Show augmentation example
+        if use_augmentation and len(clean_data) > 0:
+            with st.expander("📊 Augmentation Preview", expanded=True):
+                # Select a random sample for demonstration
+                demo_idx = np.random.randint(0, len(clean_data))
+                demo_spectrum = pd.Series(X[demo_idx], index=[float(w) for w in wavelength_cols])
+                demo_id = sample_ids[demo_idx]
+                
+                # Generate examples
+                demo_augmented = {}
+                
+                # Noise augmentation
+                aug_spec_noise = augment_spectrum(demo_spectrum, noise_level=noise_level)
+                demo_augmented[f'Noise (σ={noise_level})'] = aug_spec_noise
+                
+                # Warping augmentation
+                aug_spec_warp = augment_with_warping(demo_spectrum, warp_factor=0.01)
+                demo_augmented['Warping'] = aug_spec_warp
+                
+                # MixUp augmentation
+                j = (demo_idx + 1) % len(clean_data)
+                spec2 = pd.Series(X[j], index=[float(w) for w in wavelength_cols])
+                aug_spec_mix, _ = augment_with_mixup(demo_spectrum, spec2, y[demo_idx], y[j])
+                demo_augmented['MixUp'] = aug_spec_mix
+                
+                # Scaling augmentation
+                aug_spec_scale = augment_spectrum(demo_spectrum, scaling_range=(0.95, 1.05))
+                demo_augmented['Scaling'] = aug_spec_scale
+                
+                # Plot example
+                fig = plot_augmentation_example(demo_spectrum, demo_augmented, demo_id)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Method selection
+                st.markdown("**Select Augmentation Methods:**")
+                aug_methods_col1, aug_methods_col2, aug_methods_col3, aug_methods_col4 = st.columns(4)
+                
+                with aug_methods_col1:
+                    use_noise = st.checkbox("Noise", value=False)
+                with aug_methods_col2:
+                    use_warp = st.checkbox("Warping", value=False)
+                with aug_methods_col3:
+                    use_mixup = st.checkbox("MixUp", value=False)
+                with aug_methods_col4:
+                    use_scale = st.checkbox("Scaling", value=True)
+                
+                st.info("""
+                **Augmentation Methods:**
+                - **Noise**: Adds Gaussian noise and baseline variations
+                - **Warping**: Small shifts in wavelength domain  
+                - **MixUp**: Creates weighted combinations of two spectra
+                - **Scaling**: Multiplicative scaling of absorbance values
+                """)
+        else:
+            use_noise = True
+            use_warp = True
+            use_mixup = True
+            use_scale = True
+
+        # Apply augmentation if enabled
+        if use_augmentation and augmentation_factor > 0:
+            with st.spinner("🔄 Creating augmented dataset..."):
+                wavelengths_float = [float(w) for w in wavelength_cols]
+                
+                # Create augmented dataset with selected methods
+                X_aug, y_aug, augmented_ids = create_augmented_dataset(
+                    X, y, 
+                    wavelengths_float, 
+                    sample_ids,
+                    augmentation_factor=augmentation_factor,
+                    use_noise=use_noise,
+                    use_warp=use_warp,
+                    use_mixup=use_mixup,
+                    use_scale=use_scale,
+                    noise_level=noise_level
+                )
+                
+                # Display augmentation stats
+                aug_col1, aug_col2, aug_col3, aug_col4 = st.columns(4)
+                with aug_col1:
+                    st.metric("📊 Original Samples", len(X))
+                with aug_col2:
+                    st.metric("🔄 Augmented Samples", len(X_aug) - len(X))
+                with aug_col3:
+                    st.metric("🎯 Total Samples", len(X_aug))
+                with aug_col4:
+                    augmentation_ratio = (len(X_aug) - len(X)) / len(X) * 100
+                    st.metric("📈 Augmentation Ratio", f"{augmentation_ratio:.0f}%")
+                
+                # Use augmented data for training
+                X_train_full = X_aug
+                y_train_full = y_aug
+                st.success(f"✅ Dataset augmented from {len(X)} to {len(X_aug)} samples!")
+                
+                # Show sample of augmented IDs
+                with st.expander("🔍 View Augmented Sample IDs"):
+                    st.write("**First 20 augmented samples:**")
+                    st.write(augmented_ids[:20])
+        else:
+            X_train_full = X
+            y_train_full = y
+            st.info("ℹ️ Using original dataset without augmentation")
+
         # Apply SNV normalization
-        X_snv = apply_snv(X)
-        
+        X_snv = apply_snv(X_train_full)
+
         # Train model
         st.markdown("### 🤖 Training Model")
-        
-        n_components = min(10, X.shape[0] - 1, X.shape[1])
+
+        # Adjust PLS components based on augmented data
+        n_components = min(15, X_snv.shape[0] - 1, X_snv.shape[1])  # Increased max components
         n_components = max(1, n_components)
-        
-        test_size = min(0.2, max(0.05, 1/len(clean_data)))
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_snv, y, test_size=test_size, random_state=42
-        )
-        
-        with st.spinner("Training PLS regression model..."):
+
+        # Split data - use original indices for test set if augmented
+        if use_augmentation:
+            # Use only original samples for test set to avoid data leakage
+            test_size = min(0.2, max(0.05, 1/len(X)))
+            
+            # Ensure test_size is valid
+            if test_size >= 1.0:
+                test_size = 0.2
+            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X[:len(X)], y[:len(X)], test_size=test_size, random_state=42
+            )
+            
+            # Combine original training data with augmented data for training
+            X_train_final = np.vstack([X_train, X_aug[len(X):]])
+            y_train_final = np.vstack([y_train, y_aug[len(X):]])
+            
+        else:
+            test_size = min(0.2, max(0.05, 1/len(clean_data)))
+            if test_size >= 1.0:
+                test_size = 0.2
+                
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_snv, y, test_size=test_size, random_state=42
+            )
+            X_train_final = X_train
+            y_train_final = y_train
+
+        # Apply SNV to training data
+        if use_augmentation:
+            X_train_snv = apply_snv(X_train_final)
+            X_test_snv = apply_snv(X_test)
+        else:
+            X_train_snv = X_train
+            X_test_snv = X_test
+
+        with st.spinner("Training PLS regression model with augmented data..."):
             model = PLSRegression(n_components=n_components)
-            model.fit(X_train, y_train)
-        
+            model.fit(X_train_snv, y_train_final)
+
         st.success(f"✅ Model trained with {n_components} PLS components!")
         
-        # Evaluation
-        st.markdown("### 📈 Model Performance")
+        # ============================================
+        # MODEL EVALUATION SECTION
+        # ============================================
+        st.markdown("### 📈 Model Performance Evaluation")
         
-        # Training metrics
-        y_pred_train = model.predict(X_train)
+        # Make predictions on test set
+        y_pred = model.predict(X_test_snv)
+        
+        # Calculate metrics for each target
+        eval_cols = st.columns(len(existing_targets))
         metrics_data = []
+        
         for i, target in enumerate(existing_targets):
-            if len(np.unique(y_train[:, i])) > 1:  # Check if there's variation
-                train_r2 = r2_score(y_train[:, i], y_pred_train[:, i])
-                train_rmse = np.sqrt(mean_squared_error(y_train[:, i], y_pred_train[:, i]))
-                
-                metrics_data.append({
-                    'Target': target,
-                    'R² Score': f"{train_r2:.4f}",
-                    'RMSE': f"{train_rmse:.4f}",
-                    'Status': '✅ Good' if train_r2 > 0.7 else '⚠️ Needs improvement'
-                })
+            with eval_cols[i]:
+                if len(np.unique(y_test[:, i])) > 1:  # Check if there's variation
+                    # Calculate metrics
+                    test_r2 = r2_score(y_test[:, i], y_pred[:, i])
+                    test_rmse = np.sqrt(mean_squared_error(y_test[:, i], y_pred[:, i]))
+                    test_mae = mean_absolute_error(y_test[:, i], y_pred[:, i])
+                    test_mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / (y_test[:, i] + 1e-10))) * 100
+                    
+                    metrics_data.append({
+                        'Target': target,
+                        'Test R²': f"{test_r2:.4f}",
+                        'Test RMSE': f"{test_rmse:.4f}",
+                        'Test MAE': f"{test_mae:.4f}",
+                        'Test MAPE': f"{test_mape:.1f}%",
+                        'Status': '✅ Good' if test_r2 > 0.7 else '⚠️ Fair' if test_r2 > 0.5 else '❌ Poor'
+                    })
+                    
+                    # Create gauge for R²
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=test_r2,
+                        title={'text': f"{target} R²"},
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        gauge={
+                            'axis': {'range': [0, 1]},
+                            'bar': {'color': "#764ba2"},
+                            'steps': [
+                                {'range': [0, 0.5], 'color': "#EF4444"},
+                                {'range': [0.5, 0.7], 'color': "#F59E0B"},
+                                {'range': [0.7, 1], 'color': "#10B981"}
+                            ],
+                            'threshold': {
+                                'line': {'color': "black", 'width': 4},
+                                'thickness': 0.75,
+                                'value': 0.7
+                            }
+                        }
+                    ))
+                    fig_gauge.update_layout(height=200, margin=dict(l=20, r=20, t=50, b=20))
+                    st.plotly_chart(fig_gauge, use_container_width=True)
         
         if metrics_data:
             metrics_df = pd.DataFrame(metrics_data)
             st.dataframe(metrics_df, use_container_width=True)
+            
+            # Plot predicted vs actual
+            st.markdown("### 📊 Predicted vs Actual Values")
+            
+            # Create subplots for each target
+            fig_pred = make_subplots(
+                rows=2, cols=3,
+                subplot_titles=existing_targets[:6],
+                horizontal_spacing=0.1,
+                vertical_spacing=0.15
+            )
+            
+            for i, target in enumerate(existing_targets[:6]):
+                row = i // 3 + 1
+                col = i % 3 + 1
+                
+                fig_pred.add_trace(
+                    go.Scatter(
+                        x=y_test[:, i],
+                        y=y_pred[:, i],
+                        mode='markers',
+                        name=target,
+                        marker=dict(size=8, color='#764ba2', opacity=0.6),
+                        showlegend=False
+                    ),
+                    row=row, col=col
+                )
+                
+                # Add perfect prediction line
+                min_val = min(y_test[:, i].min(), y_pred[:, i].min())
+                max_val = max(y_test[:, i].max(), y_pred[:, i].max())
+                
+                fig_pred.add_trace(
+                    go.Scatter(
+                        x=[min_val, max_val],
+                        y=[min_val, max_val],
+                        mode='lines',
+                        name='Perfect',
+                        line=dict(color='red', dash='dash'),
+                        showlegend=False
+                    ),
+                    row=row, col=col
+                )
+                
+                fig_pred.update_xaxes(title_text="Actual", row=row, col=col)
+                fig_pred.update_yaxes(title_text="Predicted", row=row, col=col)
+            
+            fig_pred.update_layout(
+                height=600,
+                title_text="Predicted vs Actual Values (Test Set)",
+                template="plotly_white"
+            )
+            
+            st.plotly_chart(fig_pred, use_container_width=True)
         else:
-            st.warning("⚠️ Insufficient data variation to calculate metrics")
+            st.warning("⚠️ Insufficient data variation to calculate reliable metrics")
         
         # Visualization
-        col1, col2 = st.columns(2)
-        with col1:
+        viz_col1, viz_col2 = st.columns(2)
+        
+        with viz_col1:
             if spectra_dict:
+                st.markdown("### 📈 NIR Spectra Visualization")
                 fig = create_spectra_plot(spectra_dict)
                 st.plotly_chart(fig, use_container_width=True)
         
-        with col2:
+        with viz_col2:
             if len(existing_targets) > 1:
+                st.markdown("### 🔗 Target Correlation Matrix")
                 fig = px.imshow(
                     np.corrcoef(y.T),
                     x=existing_targets,
                     y=existing_targets,
                     color_continuous_scale='RdBu',
-                    title="Target Correlation Matrix"
+                    title="Target Correlation Matrix",
+                    aspect="auto",
+                    text_auto=True
                 )
                 st.plotly_chart(fig, use_container_width=True)
         
         # Save model
         st.markdown("### 💾 Save Model")
-        if st.button("💾 Save Model", type="primary", use_container_width=True):
-            dataset_info = {
-                'n_samples': len(clean_data),
-                'n_wavelengths': len(wavelength_cols),
-                'targets': existing_targets,
-                'sample_ids': clean_data['Sample ID'].tolist() if 'Sample ID' in clean_data.columns else [],
-                'created_date': datetime.now().isoformat()
-            }
-            
-            model_path = save_model(model, model_name, wavelength_cols, existing_targets, dataset_info)
-            st.session_state.trained_model = model
-            st.session_state.model_data = {
-                'model': model,
-                'wavelengths': wavelength_cols,
-                'target_cols': existing_targets,
-                'dataset_info': dataset_info
-            }
-            
-            st.success(f"✅ Model saved as `{model_name}`!")
+        
+        model_name_input = st.text_input(
+            "Model Name",
+            value=f"model_{datetime.now().strftime('%Y%m%d_%H%M')}",
+            help="Give your model a descriptive name"
+        )
+        
+        col_save1, col_save2 = st.columns(2)
+        
+        with col_save1:
+            if st.button("💾 Save Model", type="primary", use_container_width=True):
+                dataset_info = {
+                    'n_samples': len(clean_data),
+                    'n_augmented_samples': len(X_train_full) - len(clean_data) if use_augmentation else 0,
+                    'n_wavelengths': len(wavelength_cols),
+                    'targets': existing_targets,
+                    'sample_ids': clean_data['Sample ID'].tolist() if 'Sample ID' in clean_data.columns else [],
+                    'created_date': datetime.now().isoformat(),
+                    'augmentation_used': use_augmentation,
+                    'augmentation_factor': augmentation_factor if use_augmentation else 0,
+                    'model_metrics': metrics_data if metrics_data else []
+                }
+                
+                model_path = save_model(model, model_name_input, wavelength_cols, existing_targets, dataset_info)
+                st.session_state.trained_model = model
+                st.session_state.model_data = {
+                    'model': model,
+                    'wavelengths': wavelength_cols,
+                    'target_cols': existing_targets,
+                    'dataset_info': dataset_info
+                }
+                
+                st.success(f"✅ Model saved as `{model_name_input}`!")
+                
+        with col_save2:
+            if st.button("🔄 Train Another Model", use_container_width=True):
+                st.rerun()
     
     else:
+        # Training instructions when no files uploaded
+        st.markdown("""
+        <div style='background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%); padding: 2rem; border-radius: 12px;'>
+            <h2 style='color: #764ba2;'>📚 Training Instructions</h2>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        inst_col1, inst_col2 = st.columns(2)
+        
+        with inst_col1:
+            st.markdown("""
+            ### 📁 Required Files
+            
+            **1. IAS 5100 CSV files**
+            - NIR spectral data with Sample ID
+            - Format similar to IAS_Spectrum.csv
+            - Supports multiple files
+            
+            **2. Lab Results file**
+            - CSV or tab-delimited format
+            - Must contain Sample ID column
+            - Target columns: Protein, fat, ash, moisture, Fiber, wa
+            """)
+            
+        with inst_col2:
+            st.markdown("""
+            ### 🎯 Features
+            
+            **Data Processing:**
+            - Automatic Sample ID matching
+            - Duplicate handling with _dup suffix
+            - Missing value imputation
+            - SNV normalization
+            
+            **Data Augmentation:**
+            - Gaussian noise injection
+            - Wavelength warping
+            - MixUp combinations
+            - Scaling augmentation
+            
+            **Model Training:**
+            - PLS regression
+            - Automatic component selection
+            - Train/test split
+            - Performance metrics
+            """)
+        
+        st.markdown("### 📋 Lab File Format Example")
+        
+        example_data = {
+            'Sample ID': ['B2600041_01', 'B2600041_02', 'B2500012'],
+            'Protein': [23, 23, 30],
+            'fat': [21, 21, 13],
+            'ash': [4.6, 4.6, 5.6],
+            'moisture': [5, 5, 6.3],
+            'Fiber': [3.49, 3.49, 3.35],
+            'wa': [0.4, 0.4, 0.47]
+        }
+        
+        example_df = pd.DataFrame(example_data)
+        st.dataframe(example_df, use_container_width=True)
+        
         st.info("""
-        ## 📚 Training Instructions
-        
-        **Required Files:**
-        1. **IAS 5100 CSV files** - NIR spectral data with Sample ID (format similar to IAS_Spectrum.csv)
-        2. **Lab Results file** - CSV or tab-delimited with target values
-        
-        **Lab File Format Example:**
-        ```
-        Sample ID,Protein,fat,ash,moisture,Fiber,wa
-        B2600041_01,23,21,4.6,5,3.49,0.4
-        B2600041_02,23,21,4.6,5,3.49,0.4
-        B2500012,30,13,5.6,6.3,3.35,0.47
-        ```
-        
-        Upload both file types to begin training.
+        👆 **Ready to start?** Upload your NIR files and lab results file using the sidebar to begin training.
         """)
-
 elif mode == "🔮 Predict":
     st.markdown("<h1>🔮 Make Predictions</h1>", unsafe_allow_html=True)
     
