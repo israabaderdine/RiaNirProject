@@ -1801,13 +1801,23 @@ elif mode == "🚀 Train Model":
                 
                 # تدريب XGBoost مع MultiOutput
                 base_model = XGBRegressor(
-                    n_estimators=model_params.get('n_estimators', 200),
-                    learning_rate=model_params.get('learning_rate', 0.1),
-                    max_depth=model_params.get('max_depth', 6),
-                    subsample=model_params.get('subsample', 0.8),
-                    random_state=42,
-                    n_jobs=-1
+                n_estimators=model_params.get('n_estimators', 200),
+                learning_rate=model_params.get('learning_rate', 0.1),
+                max_depth=model_params.get('max_depth', 6),
+                subsample=model_params.get('subsample', 0.8),
+                random_state=42,
+                n_jobs=-1,
+                tree_method="hist"   # CPU safe
                 )
+
+                # base_model = XGBRegressor(
+                #     n_estimators=model_params.get('n_estimators', 200),
+                #     learning_rate=model_params.get('learning_rate', 0.1),
+                #     max_depth=model_params.get('max_depth', 6),
+                #     subsample=model_params.get('subsample', 0.8),
+                #     random_state=42,
+                #     n_jobs=-1
+                # )
                 model = MultiOutputRegressor(base_model)
                 model.fit(X_train_final_xgb, y_train_final)
                 
