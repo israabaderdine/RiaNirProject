@@ -18,7 +18,7 @@ from datetime import datetime
 import warnings
 import re
 
-# Suppress warnings py -m streamlit run app.py
+# Suppress warnings py -m streamlit run app.py  streamlit run app.py
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
