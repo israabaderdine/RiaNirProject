@@ -8,12 +8,17 @@ from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import train_test_split
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.multioutput import MultiOutputRegressor
+from xgboost import XGBRegressor
 import io
 import pickle
 import os
 from datetime import datetime
 import warnings
 import re
+
+# Suppress warnings py -m streamlit run app.py
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -934,6 +939,91 @@ def preprocess_spectra(X, method='snv'):
         X_smooth = savgol_filter(X, window_length=11, polyorder=2, axis=1)
         return np.gradient(X_smooth, axis=1)
     return X
+def get_model_selector():
+    """
+    إنشاء واجهة اختيار النموذج للمستخدم
+    """
+    st.markdown("### 🤖 Model Selection")
+    st.markdown("اختر نوع النموذج الذي تريد تدريبه:")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        model_type = st.radio(
+            "**نوع النموذج:**",
+            [
+                "📊 PLS Regression (سريع - خطي)",
+                "🌲 Random Forest (دقيق - غير خطي)", 
+                "⚡ XGBoost (الأفضل - دقة عالية)"
+            ],
+            index=0  # PLS هو الاختيار الافتراضي
+        )
+    
+    with col2:
+        st.markdown("**مقارنة سريعة:**")
+        if "PLS" in model_type:
+            st.info("✅ مناسب للعينات القليلة\n✅ سريع جداً\n⚠️ دقة متوسطة\n❌ يحتاج تطبيع البيانات")
+        elif "Random Forest" in model_type:
+            st.info("✅ دقة عالية\n✅ لا يحتاج تطبيع\n✅ يعطيك أهمية المتغيرات\n⚠️ بطيء قليلاً")
+        elif "XGBoost" in model_type:
+            st.info("✅ أعلى دقة\n✅ سريع جداً\n✅ يتعامل مع القيم المفقودة\n⚠️ يحتاج تعديل بارامترات")
+    
+    # بارامترات إضافية حسب النموذج
+    params = {}
+    
+    if "Random Forest" in model_type:
+        st.markdown("---")
+        st.markdown("**🔧 إعدادات Random Forest:**")
+        col1, col2 = st.columns(2)
+        with col1:
+            params['n_estimators'] = st.slider(
+                "عدد الأشجار",
+                min_value=50, max_value=500, value=200, step=50,
+                help="زيادة العدد = دقة أعلى لكن أبطأ"
+            )
+            params['max_depth'] = st.slider(
+                "عمق الشجرة",
+                min_value=5, max_value=30, value=15, step=5,
+                help="عمق أكبر = نموذج أكثر تعقيداً"
+            )
+        with col2:
+            params['min_samples_split'] = st.slider(
+                "أقل عدد للتقسيم",
+                min_value=2, max_value=10, value=5, step=1,
+                help="يمنع overfitting"
+            )
+            params['min_samples_leaf'] = st.slider(
+                "أقل عدد في الورقة",
+                min_value=1, max_value=5, value=2, step=1,
+                help="يمنع overfitting"
+            )
+            
+    elif "XGBoost" in model_type:
+        st.markdown("---")
+        st.markdown("**🔧 إعدادات XGBoost:**")
+        col1, col2 = st.columns(2)
+        with col1:
+            params['n_estimators'] = st.slider(
+                "عدد التكرارات",
+                min_value=50, max_value=500, value=200, step=50
+            )
+            params['learning_rate'] = st.select_slider(
+                "معدل التعلم",
+                options=[0.01, 0.05, 0.1, 0.2, 0.3],
+                value=0.1
+            )
+        with col2:
+            params['max_depth'] = st.slider(
+                "العمق الأقصى",
+                min_value=3, max_value=15, value=6, step=1
+            )
+            params['subsample'] = st.select_slider(
+                "نسبة العينات",
+                options=[0.6, 0.7, 0.8, 0.9, 1.0],
+                value=0.8
+            )
+    
+    return model_type, params
 def select_moisture_wavelengths(X, wavelengths, y_moisture):
     """Select wavelengths most correlated with moisture"""
     # Calculate correlation with moisture
@@ -1029,15 +1119,26 @@ def clean_and_prepare_data(dataset, target_cols):
     
     return clean_data
 
-def save_model(model, model_name, wavelengths, target_cols, dataset_info):
+def save_model(model, model_name, wavelengths, target_cols, dataset_info, model_type):
     """Save trained model to file"""
     if not os.path.exists(MODELS_DIR):
         os.makedirs(MODELS_DIR)
+    
+    # تحديد نوع النموذج
+    if 'PLSRegression' in str(type(model)):
+        model_type_name = 'PLS'
+    elif 'RandomForest' in str(type(model)):
+        model_type_name = 'Random Forest'
+    elif 'XGBoost' in str(type(model)):
+        model_type_name = 'XGBoost'
+    else:
+        model_type_name = 'Unknown'
     
     model_data = {
         'model': model,
         'wavelengths': wavelengths,
         'target_cols': target_cols,
+        'model_type': model_type_name,
         'created_date': datetime.now().isoformat(),
         'dataset_info': dataset_info
     }
@@ -1047,7 +1148,6 @@ def save_model(model, model_name, wavelengths, target_cols, dataset_info):
         pickle.dump(model_data, f)
     
     return model_path
-
 def predict_with_spectrum(model_data, spectrum):
     """Make predictions using trained model and a spectrum"""
     if model_data is None or 'model' not in model_data:
@@ -1065,16 +1165,26 @@ def predict_with_spectrum(model_data, spectrum):
         # Handle missing values
         if spectrum_aligned.isna().any():
             spectrum_aligned = spectrum_aligned.interpolate(method='linear')
-            spectrum_aligned = spectrum_aligned.ffill().bfill()
+            spectrum_aligned = spectrum_aligned.bfill().ffill()
         
         # Prepare for prediction
         X_new = spectrum_aligned.values.reshape(1, -1)
-        X_new_snv = apply_snv(X_new)
+        
+        # Check if model is PLS (needs SNV) or Tree-based (doesn't need)
+        model_type = type(model).__name__
+        
+        if 'PLSRegression' in str(model_type):
+            X_new_processed = apply_snv(X_new)
+        else:
+            # Random Forest and XGBoost don't need normalization
+            X_new_processed = X_new
         
         # Make prediction
-        prediction = model.predict(X_new_snv)
+        prediction = model.predict(X_new_processed)
+        
         # Clip negative values to 0
         prediction = np.maximum(prediction, 0)
+        
         # Create result DataFrame
         result_df = pd.DataFrame(prediction, columns=target_cols)
         return result_df, spectrum_aligned
@@ -1082,7 +1192,6 @@ def predict_with_spectrum(model_data, spectrum):
     except Exception as e:
         st.error(f"❌ Prediction error: {str(e)}")
         return None, None
-
 def create_spectra_plot(spectra_data, sample_ids=None):
     """Create interactive spectra plot using Plotly"""
     fig = go.Figure()
@@ -1646,11 +1755,79 @@ elif mode == "🚀 Train Model":
             X_train_snv = X_train
             X_test_snv = X_test
 
-        with st.spinner("Training PLS regression model with augmented data..."):
-            model = PLSRegression(n_components=n_components)
-            model.fit(X_train_snv, y_train_final)
-
-        st.success(f"✅ Model trained with {n_components} PLS components!")
+        # ============================================
+        # MODEL SELECTION SECTION
+        # ============================================
+        model_type, model_params = get_model_selector()
+        
+        # Train model based on selection
+        st.markdown("### 🤖 Training Model")
+        
+        with st.spinner(f"Training {model_type.split('(')[0].strip()} model..."):
+            
+            # اختيار النموذج المناسب
+            if "Random Forest" in model_type:
+                # Random Forest لا يحتاج تطبيع
+                if use_augmentation:
+                    X_train_final_rf = X_train_final
+                    X_test_rf = X_test
+                else:
+                    X_train_final_rf = X_train
+                    X_test_rf = X_test
+                
+                # تدريب Random Forest مع MultiOutput
+                base_model = RandomForestRegressor(
+                    n_estimators=model_params.get('n_estimators', 200),
+                    max_depth=model_params.get('max_depth', 15),
+                    min_samples_split=model_params.get('min_samples_split', 5),
+                    min_samples_leaf=model_params.get('min_samples_leaf', 2),
+                    random_state=42,
+                    n_jobs=-1
+                )
+                model = MultiOutputRegressor(base_model)
+                model.fit(X_train_final_rf, y_train_final)
+                
+                # للتقييم
+                X_test_eval = X_test_rf
+                
+            elif "XGBoost" in model_type:
+                # XGBoost لا يحتاج تطبيع
+                if use_augmentation:
+                    X_train_final_xgb = X_train_final
+                    X_test_xgb = X_test
+                else:
+                    X_train_final_xgb = X_train
+                    X_test_xgb = X_test
+                
+                # تدريب XGBoost مع MultiOutput
+                base_model = XGBRegressor(
+                    n_estimators=model_params.get('n_estimators', 200),
+                    learning_rate=model_params.get('learning_rate', 0.1),
+                    max_depth=model_params.get('max_depth', 6),
+                    subsample=model_params.get('subsample', 0.8),
+                    random_state=42,
+                    n_jobs=-1
+                )
+                model = MultiOutputRegressor(base_model)
+                model.fit(X_train_final_xgb, y_train_final)
+                
+                # للتقييم
+                X_test_eval = X_test_xgb
+                
+            else:  # PLS
+                # PLS يحتاج تطبيع
+                X_train_snv = apply_snv(X_train_final)
+                X_test_snv = apply_snv(X_test)
+                
+                model = PLSRegression(n_components=n_components)
+                model.fit(X_train_snv, y_train_final)
+                
+                # للتقييم
+                X_test_eval = X_test_snv
+        
+        # اسم النموذج للعرض
+        model_display_name = model_type.split('(')[0].strip()
+        st.success(f"✅ {model_display_name} model trained successfully!")
         
         # ============================================
         # MODEL EVALUATION SECTION
@@ -1658,21 +1835,31 @@ elif mode == "🚀 Train Model":
         st.markdown("### 📈 Model Performance Evaluation")
         
         # Make predictions on test set
-        y_pred = model.predict(X_test_snv)
-        y_pred = np.maximum(y_pred, 0)
-
+        y_pred = model.predict(X_test_eval)
+        y_pred = np.maximum(y_pred, 0)  # Clip negative values
+        
         # Calculate metrics for each target
         eval_cols = st.columns(len(existing_targets))
         metrics_data = []
         
         for i, target in enumerate(existing_targets):
             with eval_cols[i]:
-                if len(np.unique(y_test[:, i])) > 1:  # Check if there's variation
+                if len(np.unique(y_test[:, i])) > 1:
                     # Calculate metrics
                     test_r2 = r2_score(y_test[:, i], y_pred[:, i])
                     test_rmse = np.sqrt(mean_squared_error(y_test[:, i], y_pred[:, i]))
                     test_mae = mean_absolute_error(y_test[:, i], y_pred[:, i])
                     test_mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / (y_test[:, i] + 1e-10))) * 100
+                    
+                  # Status emoji
+                    if test_r2 > 0.8:
+                        status = "🏆 Excellent"
+                    elif test_r2 > 0.7:
+                        status = "✅ Good"  
+                    elif test_r2 > 0.5:
+                        status = "⚠️ Fair"
+                    else:
+                        status = "❌ Poor"
                     
                     metrics_data.append({
                         'Target': target,
@@ -1680,7 +1867,7 @@ elif mode == "🚀 Train Model":
                         'Test RMSE': f"{test_rmse:.4f}",
                         'Test MAE': f"{test_mae:.4f}",
                         'Test MAPE': f"{test_mape:.1f}%",
-                        'Status': '✅ Good' if test_r2 > 0.7 else '⚠️ Fair' if test_r2 > 0.5 else '❌ Poor'
+                        'Status': status
                     })
                     
                     # Create gauge for R²
@@ -1695,7 +1882,8 @@ elif mode == "🚀 Train Model":
                             'steps': [
                                 {'range': [0, 0.5], 'color': "#EF4444"},
                                 {'range': [0.5, 0.7], 'color': "#F59E0B"},
-                                {'range': [0.7, 1], 'color': "#10B981"}
+                                {'range': [0.7, 0.8], 'color': "#10B981"},
+                                {'range': [0.8, 1], 'color': "#059669"}
                             ],
                             'threshold': {
                                 'line': {'color': "black", 'width': 4},
@@ -1707,89 +1895,51 @@ elif mode == "🚀 Train Model":
                     fig_gauge.update_layout(height=200, margin=dict(l=20, r=20, t=50, b=20))
                     st.plotly_chart(fig_gauge, use_container_width=True)
         
+        # عرض المقاييس في جدول
         if metrics_data:
             metrics_df = pd.DataFrame(metrics_data)
             st.dataframe(metrics_df, use_container_width=True)
             
-            # Plot predicted vs actual
-            st.markdown("### 📊 Predicted vs Actual Values")
-            
-            # Create subplots for each target
-            fig_pred = make_subplots(
-                rows=2, cols=3,
-                subplot_titles=existing_targets[:6],
-                horizontal_spacing=0.1,
-                vertical_spacing=0.15
-            )
-            
-            for i, target in enumerate(existing_targets[:6]):
-                row = i // 3 + 1
-                col = i % 3 + 1
-                
-                fig_pred.add_trace(
-                    go.Scatter(
-                        x=y_test[:, i],
-                        y=y_pred[:, i],
-                        mode='markers',
-                        name=target,
-                        marker=dict(size=8, color='#764ba2', opacity=0.6),
-                        showlegend=False
-                    ),
-                    row=row, col=col
-                )
-                
-                # Add perfect prediction line
-                min_val = min(y_test[:, i].min(), y_pred[:, i].min())
-                max_val = max(y_test[:, i].max(), y_pred[:, i].max())
-                
-                fig_pred.add_trace(
-                    go.Scatter(
-                        x=[min_val, max_val],
-                        y=[min_val, max_val],
-                        mode='lines',
-                        name='Perfect',
-                        line=dict(color='red', dash='dash'),
-                        showlegend=False
-                    ),
-                    row=row, col=col
-                )
-                
-                fig_pred.update_xaxes(title_text="Actual", row=row, col=col)
-                fig_pred.update_yaxes(title_text="Predicted", row=row, col=col)
-            
-            fig_pred.update_layout(
-                height=600,
-                title_text="Predicted vs Actual Values (Test Set)",
-                template="plotly_white"
-            )
-            
-            st.plotly_chart(fig_pred, use_container_width=True)
-        else:
-            st.warning("⚠️ Insufficient data variation to calculate reliable metrics")
-        
-        # Visualization
-        viz_col1, viz_col2 = st.columns(2)
-        
-        with viz_col1:
-            if spectra_dict:
-                st.markdown("### 📈 NIR Spectra Visualization")
-                fig = create_spectra_plot(spectra_dict)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with viz_col2:
-            if len(existing_targets) > 1:
-                st.markdown("### 🔗 Target Correlation Matrix")
-                fig = px.imshow(
-                    np.corrcoef(y.T),
-                    x=existing_targets,
-                    y=existing_targets,
-                    color_continuous_scale='RdBu',
-                    title="Target Correlation Matrix",
-                    aspect="auto",
-                    text_auto=True
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
+            # ============================================
+            # FEATURE IMPORTANCE (لـ Random Forest فقط)
+            # ============================================
+            if "Random Forest" in model_type and hasattr(model, 'estimators_'):
+                with st.expander("🌲 أهمية الأطوال الموجية (Feature Importance)", expanded=True):
+                    st.markdown("""
+                    **هذه أهم الأطوال الموجية في توقع المكونات:**
+                    كلما زاد الطول، كلما كان أكثر أهمية للنموذج.
+                    """)
+                    
+                    # حساب متوسط الأهمية لكل الأهداف
+                    all_importances = []
+                    for estimator in model.estimators_:
+                        all_importances.append(estimator.feature_importances_)
+                    
+                    avg_importance = np.mean(all_importances, axis=0)
+                    
+                    # ترتيب الأطوال الموجية حسب الأهمية
+                    wavelengths_float = [float(w) for w in wavelength_cols]
+                    importance_df = pd.DataFrame({
+                        'Wavelength (nm)': wavelengths_float,
+                        'Importance': avg_importance
+                    }).sort_values('Importance', ascending=False)
+                    
+                    # عرض أهم 20 طول موجي
+                    top_n = min(20, len(importance_df))
+                    st.markdown(f"**🔝 أهم {top_n} طول موجي:**")
+                    
+                    fig_importance = px.bar(
+                        importance_df.head(top_n),
+                        x='Wavelength (nm)',
+                        y='Importance',
+                        title='Feature Importance - Top Wavelengths',
+                        color='Importance',
+                        color_continuous_scale='viridis'
+                    )
+                    st.plotly_chart(fig_importance, use_container_width=True)
+                    
+                    # عرض في جدول
+                    st.dataframe(importance_df.head(10), use_container_width=True)
         # Save model
         st.markdown("### 💾 Save Model")
         
@@ -1815,7 +1965,7 @@ elif mode == "🚀 Train Model":
                     'model_metrics': metrics_data if metrics_data else []
                 }
                 
-                model_path = save_model(model, model_name_input, wavelength_cols, existing_targets, dataset_info)
+                model_path = save_model(model, model_name_input, wavelength_cols, existing_targets, dataset_info, model_type)
                 st.session_state.trained_model = model
                 st.session_state.model_data = {
                     'model': model,
