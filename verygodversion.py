@@ -18,7 +18,9 @@ from datetime import datetime
 import warnings
 import re
 
-# Suppress warnings ch8ale fiha 3 model ma3 augemnation
+# Suppress warnings py -m streamlit run app.py  streamlit run app.py
+
+# Suppress warnings
 warnings.filterwarnings('ignore')
 
 # ==============================
@@ -106,19 +108,18 @@ st.markdown("""
 # ==============================
 # CONSTANTS - UPDATED BASED ON YOUR LAB DATA
 # ==============================
-# Your lab data columns from the example:
-# Protein, Fat, ASH, Moisture, Fiber, Wa
+# Your lab data columns: Protein, fat, ash, moisture, Fiber, wa
 TARGET_COLS = [
-    "Protein", "Fat", "ASH", "Moisture", "Fiber", "Wa"
+    "Protein", "fat", "ash", "moisture", "Fiber", "wa"
 ]
+# Note: Using exact column names from your lab data
 
 MODELS_DIR = "saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 # ==============================
-# FUNCTIONS
+# FUNCTIONS - UPDATED FOR YOUR DATA STRUCTURE
 # ==============================
-
 # ==============================
 # TEMPERATURE COMPENSATION MODULE
 # ==============================
@@ -213,7 +214,6 @@ def temperature_correct_spectrum(spectrum, target_temperature=20, current_temper
     }
     
     return corrected, correction_info
-
 def predict_with_temperature_compensation(model_data, spectrum, sample_temperature=None):
     """
     Make predictions with automatic temperature compensation
@@ -226,7 +226,7 @@ def predict_with_temperature_compensation(model_data, spectrum, sample_temperatu
     Returns:
     - predictions: corrected predictions
     - correction_info: temperature correction details
-    - negative_detected: whether negative Wa was detected and corrected
+    - negative_detected: whether negative wa was detected and corrected
     """
     # First, check if water activity might go negative
     _, temp_estimate = detect_temperature_shift(spectrum)
@@ -241,14 +241,14 @@ def predict_with_temperature_compensation(model_data, spectrum, sample_temperatu
     # Make prediction with corrected spectrum
     predictions, _ = predict_with_spectrum(model_data, corrected_spectrum)
     
-    # Check for negative Wa
+    # Check for negative wa
     negative_detected = False
-    if predictions is not None and 'Wa' in predictions.columns:
-        wa_value = predictions['Wa'].iloc[0]
+    if predictions is not None and 'wa' in predictions.columns:
+        wa_value = predictions['wa'].iloc[0]
         if wa_value < 0:
             negative_detected = True
             # Apply additional constraint for water activity (must be 0-1)
-            predictions['Wa'] = predictions['Wa'].clip(lower=0, upper=1)
+            predictions['wa'] = predictions['wa'].clip(lower=0, upper=1)
             correction_info['negative_corrected'] = True
     
     return predictions, correction_info, negative_detected
@@ -280,7 +280,66 @@ def predict_with_robustness_check(model_data, spectrum, sample_temperature=None)
         st.plotly_chart(fig, use_container_width=True)
     
     return predictions, correction_info
-
+def augment_with_temperature_variations(X, y, wavelengths, temperatures=None):
+    """
+    Augment training data with simulated temperature variations
+    
+    Parameters:
+    - X: original spectra
+    - y: target values
+    - wavelengths: wavelength points (list or array)
+    - temperatures: measured temperatures (or None to simulate)
+    
+    Returns:
+    - X_aug, y_aug: augmented dataset with temperature variations
+    """
+    augmented_spectra = []
+    augmented_targets = []
+    
+    # Temperature variations to simulate (±0°C to ±5°C)
+    temp_variations = [-5, -3, -2, -1, 0, 1, 2, 3, 5]
+    
+    # Convert wavelengths to numpy array for mathematical operations
+    wavelengths_array = np.array(wavelengths, dtype=float)
+    
+    for i in range(X.shape[0]):
+        spectrum = pd.Series(X[i], index=wavelengths_array)
+        
+        for temp_shift in temp_variations:
+            # Simulate temperature-induced shift
+            shifted_wavelengths = wavelengths_array - (temp_shift * 0.15)
+            
+            # Interpolate - ensure shifted_wavelengths is sorted
+            # np.interp requires x-coordinates to be increasing
+            sorted_indices = np.argsort(shifted_wavelengths)
+            shifted_wavelengths_sorted = shifted_wavelengths[sorted_indices]
+            spectrum_values_sorted = spectrum.values[sorted_indices]
+            
+            # Interpolate back to original wavelengths
+            shifted_values = np.interp(
+                wavelengths_array, 
+                shifted_wavelengths_sorted, 
+                spectrum_values_sorted
+            )
+            
+            augmented_spectrum = pd.Series(shifted_values, index=wavelengths_array)
+            
+            # Add small noise
+            noise = np.random.normal(0, 0.0005, len(wavelengths_array))
+            augmented_spectrum = augmented_spectrum + noise
+            
+            augmented_spectra.append(augmented_spectrum.values)
+            augmented_targets.append(y[i])
+    
+    # Stack arrays
+    if augmented_spectra:
+        X_aug = np.vstack([X] + augmented_spectra)
+        y_aug = np.vstack([y] + augmented_targets)
+    else:
+        X_aug = X
+        y_aug = y
+    
+    return X_aug, y_aug
 def visualize_temperature_shift(spectrum, correction_info):
     """Visualize the temperature-induced spectral shift"""
     fig = go.Figure()
@@ -322,75 +381,284 @@ def visualize_temperature_shift(spectrum, correction_info):
     )
     
     return fig
+def augment_spectrum(spectrum, noise_level=0.001, shift_max=1, scaling_range=(0.98, 1.02)):
+    """
+    Apply multiple augmentation techniques to a single spectrum
+    
+    Parameters:
+    - spectrum: pandas Series with wavelength index
+    - noise_level: standard deviation of Gaussian noise
+    - shift_max: maximum wavelength shift in nm
+    - scaling_range: min/max for multiplicative scaling
+    """
+    augmented = spectrum.copy()
+    
+    # 1. Add Gaussian noise
+    if noise_level > 0:
+        noise = np.random.normal(0, noise_level, len(spectrum))
+        augmented = augmented + noise
+    
+    # 2. Multiplicative scaling
+    scale_factor = np.random.uniform(scaling_range[0], scaling_range[1])
+    augmented = augmented * scale_factor
+    
+    # 3. Baseline shift
+    baseline_shift = np.random.normal(0, noise_level * 10)
+    augmented = augmented + baseline_shift
+    
+    return augmented
+
+def augment_with_warping(spectrum, warp_factor=0.01):
+    """
+    Apply wavelength warping (small shifts in wavelength domain)
+    """
+    wavelengths = spectrum.index.values
+    new_wavelengths = wavelengths * (1 + np.random.uniform(-warp_factor, warp_factor))
+    
+    # Interpolate back to original wavelengths
+    warped_spectrum = pd.Series(
+        np.interp(wavelengths, new_wavelengths, spectrum.values),
+        index=wavelengths
+    )
+    
+    return warped_spectrum
+def augment_with_mixup(spectrum1, spectrum2, y1, y2, alpha=0.2):
+    """
+    MixUp augmentation: create weighted combination of two spectra and their labels
+    
+    Parameters:
+    - spectrum1, spectrum2: pandas Series with wavelength index
+    - y1, y2: target values for each spectrum
+    - alpha: Beta distribution parameter
+    """
+    lambda_val = np.random.beta(alpha, alpha)
+    
+    # Mix spectra
+    mixed_spectrum = lambda_val * spectrum1 + (1 - lambda_val) * spectrum2
+    
+    # Mix labels
+    mixed_y = lambda_val * y1 + (1 - lambda_val) * y2
+    
+    return mixed_spectrum, mixed_y
+
+def augment_with_warping(spectrum, warp_factor=0.01):
+    """
+    Apply wavelength warping (small shifts in wavelength domain)
+    """
+    wavelengths = spectrum.index.values
+    new_wavelengths = wavelengths * (1 + np.random.uniform(-warp_factor, warp_factor))
+    
+    # Interpolate back to original wavelengths
+    warped_spectrum = pd.Series(
+        np.interp(wavelengths, new_wavelengths, spectrum.values),
+        index=wavelengths
+    )
+    
+    return warped_spectrum
+def create_augmented_dataset(X, y, wavelengths, sample_ids, augmentation_factor=3, 
+                            use_noise=True, use_warp=True, use_mixup=True, use_scale=True,
+                            noise_level=0.001):
+    """
+    Create augmented dataset with multiple techniques
+    
+    Parameters:
+    - X: original spectra matrix (n_samples, n_features)
+    - y: target values matrix (n_samples, n_targets)
+    - wavelengths: list of wavelength values
+    - sample_ids: list of sample IDs
+    - augmentation_factor: multiplier for dataset size
+    - use_noise: whether to use noise augmentation
+    - use_warp: whether to use wavelength warping
+    - use_mixup: whether to use MixUp augmentation
+    - use_scale: whether to use scaling augmentation
+    - noise_level: standard deviation for Gaussian noise
+    
+    Returns:
+    - X_aug, y_aug, augmented_ids
+    """
+    augmented_spectra = []
+    augmented_targets = []
+    augmented_ids = []
+    
+    n_samples = X.shape[0]
+    n_targets = y.shape[1] if len(y.shape) > 1 else 1
+    
+    # Collect available methods
+    available_methods = []
+    if use_noise:
+        available_methods.append('noise')
+    if use_warp:
+        available_methods.append('warp')
+    if use_mixup:
+        available_methods.append('mixup')
+    if use_scale:
+        available_methods.append('scale')
+    
+    # Default to noise if no methods selected
+    if not available_methods:
+        available_methods = ['noise']
+    
+    # Create augmented samples
+    for i in range(n_samples):
+        # Original spectrum as Series
+        spectrum = pd.Series(X[i], index=wavelengths)
+        
+        # Create multiple augmented versions
+        for aug_idx in range(augmentation_factor):
+            # Randomly choose augmentation method
+            method = np.random.choice(available_methods)
+            
+            if method == 'noise':
+                aug_spectrum = augment_spectrum(
+                    spectrum, 
+                    noise_level=noise_level
+                )
+                aug_y = y[i].copy()
+                
+            elif method == 'warp':
+                aug_spectrum = augment_with_warping(
+                    spectrum,
+                    warp_factor=np.random.uniform(0.005, 0.02)
+                )
+                aug_y = y[i].copy()
+                
+            elif method == 'mixup':
+                # Mix with another random sample
+                j = np.random.randint(0, n_samples)
+                while j == i:
+                    j = np.random.randint(0, n_samples)
+                
+                spectrum2 = pd.Series(X[j], index=wavelengths)
+                aug_spectrum, aug_y = augment_with_mixup(
+                    spectrum, spectrum2,
+                    y[i], y[j],
+                    alpha=0.2
+                )
+                
+            elif method == 'scale':
+                # Scaling augmentation
+                aug_spectrum = augment_spectrum(
+                    spectrum,
+                    noise_level=0,  # No noise
+                    scaling_range=(0.95, 1.05)
+                )
+                aug_y = y[i].copy()
+            
+            # Ensure no NaN values
+            if aug_spectrum.isna().any():
+                aug_spectrum = aug_spectrum.interpolate(method='linear')
+                aug_spectrum = aug_spectrum.bfill().ffill()
+            
+            augmented_spectra.append(aug_spectrum.values)
+            augmented_targets.append(aug_y)
+            augmented_ids.append(f"{sample_ids[i]}_aug{aug_idx+1}")
+    
+    # Combine original and augmented data
+    X_aug = np.vstack([X, np.array(augmented_spectra)])
+    y_aug = np.vstack([y, np.array(augmented_targets)])
+    all_ids = list(sample_ids) + augmented_ids
+    
+    return X_aug, y_aug, all_ids
+
+def plot_augmentation_example(original_spectrum, augmented_spectra, sample_id):
+    """Plot original vs augmented spectra for visualization"""
+    fig = go.Figure()
+    
+    # Original spectrum
+    fig.add_trace(go.Scatter(
+        x=original_spectrum.index,
+        y=original_spectrum.values,
+        mode='lines',
+        name=f'Original {sample_id}',
+        line=dict(color='#764ba2', width=3)
+    ))
+    
+    # Augmented spectra
+    colors = ['#10B981', '#F59E0B', '#EF4444', '#3B82F6']
+    for idx, (name, aug_spec) in enumerate(augmented_spectra.items()):
+        fig.add_trace(go.Scatter(
+            x=aug_spec.index,
+            y=aug_spec.values,
+            mode='lines',
+            name=name,
+            line=dict(color=colors[idx % len(colors)], width=1.5, dash='dot'),
+            opacity=0.7
+        ))
+    
+    fig.update_layout(
+        title=f"Data Augmentation Example - {sample_id}",
+        xaxis_title="Wavelength (nm)",
+        yaxis_title="Absorbance",
+        template="plotly_white",
+        hovermode='x unified',
+        height=500
+    )
+    
+    return fig
+
+
+
+
+
+
+
 
 def parse_ias_5100(file, duplicate_counter=None):
-    """Parse IAS 5100 CSV file - Extract Batch Number and spectrum data"""
-    file_name = file.name  # Define file_name at the very beginning
-    
+    """Parse IAS 5100 CSV file - extract Sample ID and spectrum data"""
     try:
-        # Try different encodings
-        content = None
-        encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+        content = file.getvalue().decode("utf-8").splitlines()
+        file_name = file.name
         
-        for encoding in encodings:
-            try:
-                file.seek(0)  # Reset file pointer
-                content = file.getvalue().decode(encoding).splitlines()
-                break
-            except UnicodeDecodeError:
-                continue
+        sample_id = None
         
-        if content is None:
-            st.error(f"❌ Could not decode file {file_name} with any encoding")
-            return pd.Series(), file_name
-        
-        batch_number = None
-        
-        # Method 1: Look for Batch Number in your NIR file format
-        for i, line in enumerate(content):
-            # Look for the line containing "Batch Number"
-            if 'Batch Number' in line:
-                parts = line.split('\t') if '\t' in line else line.split(',')
+        # Method 1: Look for Sample ID in your NIR file format
+        for line in content:
+            if 'Sample ID' in line:
+                parts = line.split(',')
                 if len(parts) >= 2:
-                    # The batch number is usually the next part after "Batch Number"
-                    potential_batch = parts[1].strip()
-                    if potential_batch and potential_batch not in ['Reference', 'Sample', '']:
-                        batch_number = potential_batch
+                    potential_id = parts[1].strip()
+                    if potential_id and potential_id not in ['Reference', 'Sample', '']:
+                        sample_id = potential_id
                         break
         
-        # Method 2: Scan for batch number pattern (B followed by digits)
-        if not batch_number:
+        # Method 2: Extract from content based on your data format
+        if not sample_id:
             for line in content:
-                # Look for patterns like B2500094, B2600041_01, etc.
-                matches = re.findall(r'B\d{6,8}(?:_\d{2})?', line)
-                if matches:
-                    batch_number = matches[0]
+                # Look for patterns like B2500343, B2600041_01, etc.
+                if re.search(r'B\d{6,8}', line):
+                    parts = line.split(',')
+                    for part in parts:
+                        cleaned = part.strip()
+                        if re.match(r'^B\d{6,8}(_\d{2})?$', cleaned):
+                            sample_id = cleaned
+                            break
+                if sample_id:
                     break
         
         # Method 3: Extract from filename
-        if not batch_number:
+        if not sample_id:
             filename = file_name.replace('.csv', '')
-            # Look for batch number patterns in filename
+            # Look for sample ID patterns in filename
             match = re.search(r'(B\d{6,8}[_\.]?\d{0,2})', filename)
             if match:
-                batch_number = match.group(1)
+                sample_id = match.group(1)
         
-        if not batch_number:
-            batch_number = file_name.replace('.csv', '')
-            st.warning(f"⚠️ Batch Number not found in file. Using filename as Batch Number: {batch_number}")
+        if not sample_id:
+            sample_id = file_name.replace('.csv', '')
+            st.warning(f"⚠️ Sample ID not found in file. Using filename as ID: {sample_id}")
         
         # Find and parse spectrum data
         start_idx = None
         for i, line in enumerate(content):
             # Look for wavelength header
-            if line.lower().startswith('wavelength') or ',absorbance' in line.lower() or 'Wavelength' in line:
+            if line.lower().startswith('wavelength') or ',absorbance' in line.lower():
                 start_idx = i
                 break
         
         if start_idx is None:
             # Find first line with numeric wavelength
             for i, line in enumerate(content):
-                parts = line.split('\t') if '\t' in line else line.split(',')
+                parts = line.split(',')
                 if len(parts) >= 2:
                     first_val = parts[0].strip()
                     if first_val and first_val.replace('.', '').replace('-', '').isdigit():
@@ -398,22 +666,11 @@ def parse_ias_5100(file, duplicate_counter=None):
                         break
         
         if start_idx is None:
-            st.error(f"❌ Spectrum table not found in file {file_name}")
-            return pd.Series(), batch_number
+            st.error("❌ Spectrum table not found in file")
+            return pd.Series(), sample_id
         
-        # Parse the spectrum data - try different delimiters
-        spectrum_data = "\n".join(content[start_idx:])
-        
-        try:
-            # Try comma first
-            df = pd.read_csv(io.StringIO(spectrum_data))
-        except:
-            try:
-                # Try tab delimiter
-                df = pd.read_csv(io.StringIO(spectrum_data), sep='\t')
-            except:
-                # Try space delimiter
-                df = pd.read_csv(io.StringIO(spectrum_data), sep='\s+')
+        # Parse the spectrum data
+        df = pd.read_csv(io.StringIO("\n".join(content[start_idx:])))
         
         # Identify wavelength and absorbance columns
         wavelength_col = None
@@ -442,158 +699,71 @@ def parse_ias_5100(file, duplicate_counter=None):
             spectrum = df.set_index('Wavelength')['Absorbance']
             
             # Apply duplicate suffix if provided
-            display_batch = batch_number
+            display_id = sample_id
             if duplicate_counter and duplicate_counter > 1:
-                display_batch = f"{batch_number}_scan{duplicate_counter}"
-                st.info(f"📝 Duplicate Batch Number '{batch_number}' found. Using '{display_batch}' for this spectrum.")
+                display_id = f"{sample_id}_dup{duplicate_counter}"
+                st.info(f"📝 Duplicate sample ID '{sample_id}' found. Using '{display_id}' for this spectrum.")
             
-            st.success(f"✅ {file_name}: Batch={display_batch}, Points={len(spectrum)}, Range={spectrum.index.min():.0f}-{spectrum.index.max():.0f}nm")
-            return spectrum, display_batch
+            st.success(f"✅ {file_name}: ID={display_id}, Points={len(spectrum)}, Range={spectrum.index.min():.0f}-{spectrum.index.max():.0f}nm")
+            return spectrum, display_id
         
-        return pd.Series(), batch_number
+        return pd.Series(), sample_id
         
     except Exception as e:
         st.error(f"❌ Error parsing file {file_name}: {str(e)}")
         return pd.Series(), file_name
-
 def load_lab_data(lab_file):
-    """Load lab data with support for multiple encodings and separators"""
+    """Load lab data with support for both CSV and tab-delimited files"""
     try:
-        file_name = lab_file.name
-        content = lab_file.getvalue()
-        
-        # Try different encodings
-        encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'utf-16']
-        decoded_content = None
-        
-        for encoding in encodings:
-            try:
-                lab_file.seek(0)
-                decoded_content = content.decode(encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-        
-        if decoded_content is None:
-            st.error(f"❌ Could not decode lab file {file_name} with any encoding")
-            return None
-        
         # Try different separators
-        separators = [',', '\t', ';', '|', ' ']
-        lab_df = None
-        
-        for sep in separators:
+        for sep in [',', '\t', ';']:
             try:
+                lab_df = pd.read_csv(lab_file, sep=sep, engine='python')
                 lab_file.seek(0)
-                # Try reading with specific separator
-                df = pd.read_csv(io.StringIO(decoded_content), sep=sep, engine='python', 
-                               skipinitialspace=True)
                 
-                # Clean column names - strip whitespace
-                df.columns = [col.strip() for col in df.columns]
+                # Clean column names
+                lab_df.columns = [col.strip() for col in lab_df.columns]
                 
-                # Check if we have at least 2 columns and some data
-                if len(df.columns) >= 2 and len(df) > 0:
-                    lab_df = df
-                    st.info(f"📋 Successfully parsed with separator: '{sep}'")
-                    break
+                # Show loaded columns for debugging
+                st.info(f"📋 Columns found in lab file: {list(lab_df.columns)}")
+                
+                # Identify Sample ID column
+                sample_id_col = None
+                for col in lab_df.columns:
+                    col_lower = col.lower()
+                    if 'sample' in col_lower or 'id' in col_lower:
+                        sample_id_col = col
+                        break
+                
+                if sample_id_col:
+                    lab_df['Sample ID'] = lab_df[sample_id_col].astype(str).str.strip()
+                    st.success(f"✅ Found Sample ID in column: '{sample_id_col}'")
+                else:
+                    # Check if 'Sample ID' column exists
+                    if 'Sample ID' in lab_df.columns:
+                        lab_df['Sample ID'] = lab_df['Sample ID'].astype(str).str.strip()
+                    else:
+                        # Use first column that looks like sample IDs
+                        for col in lab_df.columns:
+                            if lab_df[col].astype(str).str.contains(r'B\d+').any():
+                                lab_df['Sample ID'] = lab_df[col].astype(str).str.strip()
+                                st.success(f"✅ Using column '{col}' as Sample ID")
+                                break
+                
+                if 'Sample ID' not in lab_df.columns:
+                    st.error("❌ No Sample ID column found in lab data!")
+                    return None
+                
+                # Show a preview of the data
+                st.dataframe(lab_df.head(), use_container_width=True)
+                
+                return lab_df
+                
             except Exception:
                 continue
         
-        if lab_df is None:
-            # Try to auto-detect separator
-            try:
-                lab_df = pd.read_csv(io.StringIO(decoded_content), sep=None, engine='python')
-                lab_df.columns = [col.strip() for col in lab_df.columns]
-                st.info("📋 Successfully parsed with auto-detected separator")
-            except Exception as e:
-                st.error(f"❌ Could not parse lab file with any separator: {str(e)}")
-                return None
-        
-        st.info(f"📋 Columns found in lab file: {list(lab_df.columns)}")
-        
-        # Show a preview of raw data
-        st.markdown("**📄 Raw Data Preview (first 5 rows):**")
-        st.dataframe(lab_df.head(), use_container_width=True)
-        
-        # Identify Batch Number column
-        batch_col = None
-        for col in lab_df.columns:
-            col_lower = col.lower().strip()
-            if 'batch' in col_lower or 'batchnumber' in col_lower.replace(' ', ''):
-                batch_col = col
-                break
-        
-        if batch_col:
-            lab_df['Batch Number'] = lab_df[batch_col].astype(str).str.strip()
-            st.success(f"✅ Found Batch Number in column: '{batch_col}'")
-        else:
-            # Check if 'Batch Number' column exists (exact match)
-            if 'Batch Number' in lab_df.columns:
-                lab_df['Batch Number'] = lab_df['Batch Number'].astype(str).str.strip()
-                st.success("✅ Found 'Batch Number' column")
-            else:
-                # Try to find column with Bxxxx pattern
-                for col in lab_df.columns:
-                    # Check if column contains values that look like batch numbers
-                    sample_vals = lab_df[col].astype(str).head(10)
-                    if sample_vals.str.contains(r'B\d{6,8}').any():
-                        lab_df['Batch Number'] = lab_df[col].astype(str).str.strip()
-                        st.success(f"✅ Using column '{col}' as Batch Number (contains Bxxxx pattern)")
-                        batch_col = col
-                        break
-        
-        if 'Batch Number' not in lab_df.columns:
-            st.error("❌ No Batch Number column found in lab data!")
-            st.markdown("**Available columns:**")
-            for col in lab_df.columns:
-                st.markdown(f"• '{col}'")
-            return None
-        
-        # Check for target columns
-        found_targets = []
-        missing_targets = []
-        
-        for target in TARGET_COLS:
-            # Try exact match
-            if target in lab_df.columns:
-                found_targets.append(target)
-            # Try case-insensitive match
-            else:
-                found = False
-                for col in lab_df.columns:
-                    if col.lower() == target.lower():
-                        lab_df[target] = lab_df[col]  # Rename to standard name
-                        found_targets.append(target)
-                        found = True
-                        break
-                if not found:
-                    missing_targets.append(target)
-        
-        if found_targets:
-            st.success(f"✅ Found target columns: {', '.join(found_targets)}")
-        if missing_targets:
-            st.warning(f"⚠️ Missing target columns: {', '.join(missing_targets)}")
-        
-        # Convert target columns to numeric
-        for target in found_targets:
-            lab_df[target] = pd.to_numeric(lab_df[target], errors='coerce')
-        
-        # Show cleaned data preview
-        st.markdown("**📊 Cleaned Data Preview:**")
-        preview_cols = ['Batch Number'] + found_targets
-        st.dataframe(lab_df[preview_cols].head(), use_container_width=True)
-        
-        # Show data info
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Rows", len(lab_df))
-        with col2:
-            st.metric("Unique Batches", lab_df['Batch Number'].nunique())
-        with col3:
-            st.metric("Target Columns", len(found_targets))
-        
-        return lab_df
+        st.error("❌ Could not parse lab file with any separator.")
+        return None
         
     except Exception as e:
         st.error(f"❌ Error loading lab data: {str(e)}")
@@ -611,81 +781,81 @@ def apply_snv(X):
     return (X - mean) / std
 
 def prepare_training_data(spectra_dict, lab_df):
-    """Prepare training data from spectra and lab data - ONE lab result per Batch Number"""
+    """Prepare training data from spectra and lab data - ONE lab result per sample ID"""
     with st.expander("🔍 Data Matching Analysis", expanded=True):
-        spectra_batches = list(spectra_dict.keys())
+        spectra_ids = list(spectra_dict.keys())
         
-        # Remove _scan suffix for matching
-        base_batches_dict = {}
-        for spec_batch, spectrum in spectra_dict.items():
-            base_batch = re.sub(r'_scan\d+$', '', spec_batch)
-            if base_batch not in base_batches_dict:
-                base_batches_dict[base_batch] = []
-            base_batches_dict[base_batch].append((spec_batch, spectrum))
+        # Remove _dup suffix for matching
+        base_spectra_dict = {}
+        for spec_id, spectrum in spectra_dict.items():
+            base_id = re.sub(r'_dup\d+$', '', spec_id)
+            if base_id not in base_spectra_dict:
+                base_spectra_dict[base_id] = []
+            base_spectra_dict[base_id].append((spec_id, spectrum))
         
         # Clean lab data
         lab_df = lab_df.copy()
-        lab_df['Batch Number'] = lab_df['Batch Number'].astype(str).str.strip()
+        lab_df['Sample ID'] = lab_df['Sample ID'].astype(str).str.strip()
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("**📊 Unique Batch Numbers from NIR files:**")
-            st.markdown(f"**Total spectra:** {len(spectra_dict)}")
-            st.markdown(f"**Unique batches:** {len(base_batches_dict)}")
-            for base_batch in list(base_batches_dict.keys())[:10]:
-                count = len(base_batches_dict[base_batch])
+            st.markdown("**📊 Unique Sample IDs from NIR files:**")
+            st.markdown(f"**Total spectra:** {len(spectra_ids)}")
+            st.markdown(f"**Unique samples:** {len(base_spectra_dict)}")
+            for base_id in list(base_spectra_dict.keys())[:10]:
+                count = len(base_spectra_dict[base_id])
                 if count > 1:
-                    st.markdown(f"• {base_batch} (×{count} scans)")
+                    st.markdown(f"• {base_id} (×{count} scans)")
                 else:
-                    st.markdown(f"• {base_batch}")
-            if len(base_batches_dict) > 10:
-                st.markdown(f"*... and {len(base_batches_dict) - 10} more*")
+                    st.markdown(f"• {base_id}")
+            if len(base_spectra_dict) > 10:
+                st.markdown(f"*... and {len(base_spectra_dict) - 10} more*")
         
         with col2:
-            st.markdown("**📋 Batch Numbers from Lab file:**")
-            for lab_batch in lab_df['Batch Number'].tolist()[:10]:
-                st.markdown(f"• {lab_batch}")
+            st.markdown("**📋 Sample IDs from Lab file:**")
+            for lab_id in lab_df['Sample ID'].tolist()[:10]:
+                st.markdown(f"• {lab_id}")
             if len(lab_df) > 10:
                 st.markdown(f"*... and {len(lab_df) - 10} more*")
             st.metric("Lab Samples", len(lab_df))
         
-        # Find matches - each batch number should have ONE lab result
+        # Find matches - each sample ID should have ONE lab result
         matches = []
-        matched_base_batches = set()
+        matched_base_ids = set()
         
-        for base_batch, spectra_list in base_batches_dict.items():
-            # Find lab entry for this base batch
-            lab_entry = lab_df[lab_df['Batch Number'] == base_batch]
+        for base_id, spectra_list in base_spectra_dict.items():
+            # Find lab entry for this base ID
+            lab_entry = lab_df[lab_df['Sample ID'] == base_id]
             
             if not lab_entry.empty:
                 lab_data = lab_entry.iloc[0]  # Take first matching lab entry
                 
-                # Match ALL spectra for this base batch with the SAME lab result
-                for spec_batch, spectrum in spectra_list:
+                # Match ALL spectra for this base ID with the SAME lab result
+                for spec_id, spectrum in spectra_list:
                     matches.append({
-                        'NIR_Batch': spec_batch,
-                        'Base_Batch': base_batch,
-                        'Lab_Batch': lab_data['Batch Number'],
+                        'NIR_Sample_ID': spec_id,
+                        'Base_Sample_ID': base_id,
+                        'Lab_Sample_ID': lab_data['Sample ID'],
                         'Lab_Row_Index': lab_entry.index[0]
                     })
                 
-                matched_base_batches.add(base_batch)
-                st.info(f"✅ Matched {len(spectra_list)} spectra for batch {base_batch} with lab result")
+                matched_base_ids.add(base_id)
+                st.info(f"✅ Matched {len(spectra_list)} spectra for sample {base_id} with lab result")
         
         if matches:
             st.success(f"✅ **{len(matches)}** spectrum-lab matches found!")
-            st.info(f"**{len(matched_base_batches)}** unique batches with lab results")
+            st.info(f"**{len(matched_base_ids)}** unique samples with lab results")
             
             # Show match summary
             match_summary = pd.DataFrame(matches)
-            match_counts = match_summary['Base_Batch'].value_counts()
+            match_counts = match_summary['Base_Sample_ID'].value_counts()
             
             st.markdown("**📊 Match Summary:**")
             summary_data = []
-            for base_batch, count in match_counts.items():
+            for base_id, count in match_counts.items():
                 summary_data.append({
-                    'Batch Number': base_batch,
+                    'Sample ID': base_id,
                     'Spectra Count': count,
                     'Status': f"✅ {count} scans"
                 })
@@ -694,34 +864,34 @@ def prepare_training_data(spectra_dict, lab_df):
             st.dataframe(summary_df, use_container_width=True)
             
             # Check for unmatched
-            unmatched_batches = [bid for bid in base_batches_dict.keys() if bid not in matched_base_batches]
-            if unmatched_batches:
-                st.warning(f"⚠️ {len(unmatched_batches)} batches without lab results:")
-                for unmatched in unmatched_batches[:5]:
+            unmatched_spectra = [sid for sid in base_spectra_dict.keys() if sid not in matched_base_ids]
+            if unmatched_spectra:
+                st.warning(f"⚠️ {len(unmatched_spectra)} samples without lab results:")
+                for unmatched in unmatched_spectra[:5]:
                     st.markdown(f"• {unmatched}")
-                if len(unmatched_batches) > 5:
-                    st.markdown(f"*... and {len(unmatched_batches) - 5} more*")
+                if len(unmatched_spectra) > 5:
+                    st.markdown(f"*... and {len(unmatched_spectra) - 5} more*")
         else:
-            st.error("❌ No matching Batch Numbers found!")
+            st.error("❌ No matching Sample IDs found!")
             return None, [], "none"
         
         # Create dataset with all spectra and their corresponding lab results
         dataset_rows = []
         
         for match in matches:
-            spec_batch = match['NIR_Batch']
-            base_batch = match['Base_Batch']
+            spec_id = match['NIR_Sample_ID']
+            base_id = match['Base_Sample_ID']
             
             # Get spectrum
-            spectrum = spectra_dict[spec_batch]
+            spectrum = spectra_dict[spec_id]
             
-            # Get lab data for this base batch
-            lab_row = lab_df[lab_df['Batch Number'] == base_batch].iloc[0]
+            # Get lab data for this base ID
+            lab_row = lab_df[lab_df['Sample ID'] == base_id].iloc[0]
             
             # Create row
             row_data = {
-                'NIR_Batch': spec_batch,
-                'Batch Number': base_batch
+                'NIR_Sample_ID': spec_id,
+                'Sample ID': base_id
             }
             
             # Add spectrum data
@@ -729,16 +899,10 @@ def prepare_training_data(spectra_dict, lab_df):
             for wl, abs_val in zip(spectrum.index, spectrum.values):
                 row_data[str(wl)] = abs_val
             
-            # Add lab results - using exact column names from your data
+            # Add lab results
             for target in TARGET_COLS:
                 if target in lab_row:
                     row_data[target] = lab_row[target]
-                elif target.lower() in [c.lower() for c in lab_row.index]:
-                    # Case-insensitive match
-                    for col in lab_row.index:
-                        if col.lower() == target.lower():
-                            row_data[target] = lab_row[col]
-                            break
             
             dataset_rows.append(row_data)
         
@@ -750,11 +914,10 @@ def prepare_training_data(spectra_dict, lab_df):
         
         # Show preview
         st.markdown("**📈 Dataset Preview:**")
-        preview_cols = ['NIR_Batch', 'Batch Number'] + [col for col in TARGET_COLS if col in dataset.columns]
+        preview_cols = ['NIR_Sample_ID', 'Sample ID'] + [col for col in TARGET_COLS if col in dataset.columns]
         st.dataframe(dataset[preview_cols].head(), use_container_width=True)
         
-        return dataset, [m['NIR_Batch'] for m in matches], "matched"
-
+        return dataset, [m['NIR_Sample_ID'] for m in matches], "matched"
 def preprocess_spectra(X, method='snv'):
     """Apply different spectral pre-processing methods"""
     if method == 'snv':
@@ -776,89 +939,104 @@ def preprocess_spectra(X, method='snv'):
         X_smooth = savgol_filter(X, window_length=11, polyorder=2, axis=1)
         return np.gradient(X_smooth, axis=1)
     return X
-
 def get_model_selector():
     """
-    Create model selection interface
+    إنشاء واجهة اختيار النموذج للمستخدم
     """
     st.markdown("### 🤖 Model Selection")
-    st.markdown("Choose the model type to train:")
+    st.markdown("اختر نوع النموذج الذي تريد تدريبه:")
     
     col1, col2 = st.columns(2)
     
     with col1:
         model_type = st.radio(
-            "**Model Type:**",
+            "**نوع النموذج:**",
             [
-                "📊 PLS Regression (Fast - Linear)",
-                "🌲 Random Forest (Accurate - Non-linear)", 
-                "⚡ XGBoost (Best - High Accuracy)"
+                "📊 PLS Regression (سريع - خطي)",
+                "🌲 Random Forest (دقيق - غير خطي)", 
+                "⚡ XGBoost (الأفضل - دقة عالية)"
             ],
-            index=0
+            index=0  # PLS هو الاختيار الافتراضي
         )
     
     with col2:
-        st.markdown("**Quick Comparison:**")
+        st.markdown("**مقارنة سريعة:**")
         if "PLS" in model_type:
-            st.info("✅ Good for small datasets\n✅ Very fast\n⚠️ Medium accuracy\n❌ Needs data normalization")
+            st.info("✅ مناسب للعينات القليلة\n✅ سريع جداً\n⚠️ دقة متوسطة\n❌ يحتاج تطبيع البيانات")
         elif "Random Forest" in model_type:
-            st.info("✅ High accuracy\n✅ No normalization needed\n✅ Feature importance\n⚠️ Slower")
+            st.info("✅ دقة عالية\n✅ لا يحتاج تطبيع\n✅ يعطيك أهمية المتغيرات\n⚠️ بطيء قليلاً")
         elif "XGBoost" in model_type:
-            st.info("✅ Highest accuracy\n✅ Very fast\n✅ Handles missing values\n⚠️ Needs parameter tuning")
+            st.info("✅ أعلى دقة\n✅ سريع جداً\n✅ يتعامل مع القيم المفقودة\n⚠️ يحتاج تعديل بارامترات")
     
-    # Additional parameters based on model
+    # بارامترات إضافية حسب النموذج
     params = {}
     
     if "Random Forest" in model_type:
         st.markdown("---")
-        st.markdown("**🔧 Random Forest Settings:**")
+        st.markdown("**🔧 إعدادات Random Forest:**")
         col1, col2 = st.columns(2)
         with col1:
             params['n_estimators'] = st.slider(
-                "Number of trees",
-                min_value=50, max_value=500, value=200, step=50
+                "عدد الأشجار",
+                min_value=50, max_value=500, value=200, step=50,
+                help="زيادة العدد = دقة أعلى لكن أبطأ"
             )
             params['max_depth'] = st.slider(
-                "Tree depth",
-                min_value=5, max_value=30, value=15, step=5
+                "عمق الشجرة",
+                min_value=5, max_value=30, value=15, step=5,
+                help="عمق أكبر = نموذج أكثر تعقيداً"
             )
         with col2:
             params['min_samples_split'] = st.slider(
-                "Min samples split",
-                min_value=2, max_value=10, value=5, step=1
+                "أقل عدد للتقسيم",
+                min_value=2, max_value=10, value=5, step=1,
+                help="يمنع overfitting"
             )
             params['min_samples_leaf'] = st.slider(
-                "Min samples leaf",
-                min_value=1, max_value=5, value=2, step=1
+                "أقل عدد في الورقة",
+                min_value=1, max_value=5, value=2, step=1,
+                help="يمنع overfitting"
             )
             
     elif "XGBoost" in model_type:
         st.markdown("---")
-        st.markdown("**🔧 XGBoost Settings:**")
+        st.markdown("**🔧 إعدادات XGBoost:**")
         col1, col2 = st.columns(2)
         with col1:
             params['n_estimators'] = st.slider(
-                "Number of estimators",
+                "عدد التكرارات",
                 min_value=50, max_value=500, value=200, step=50
             )
             params['learning_rate'] = st.select_slider(
-                "Learning rate",
+                "معدل التعلم",
                 options=[0.01, 0.05, 0.1, 0.2, 0.3],
                 value=0.1
             )
         with col2:
             params['max_depth'] = st.slider(
-                "Max depth",
+                "العمق الأقصى",
                 min_value=3, max_value=15, value=6, step=1
             )
             params['subsample'] = st.select_slider(
-                "Subsample ratio",
+                "نسبة العينات",
                 options=[0.6, 0.7, 0.8, 0.9, 1.0],
                 value=0.8
             )
     
     return model_type, params
-
+def select_moisture_wavelengths(X, wavelengths, y_moisture):
+    """Select wavelengths most correlated with moisture"""
+    # Calculate correlation with moisture
+    correlations = []
+    for i in range(X.shape[1]):
+        corr = np.corrcoef(X[:, i], y_moisture)[0, 1]
+        correlations.append(abs(corr))
+    
+    # Select top wavelengths
+    n_selected = min(100, X.shape[1])  # Select top 100 or all if less
+    idx_sorted = np.argsort(correlations)[-n_selected:]
+    
+    return X[:, idx_sorted], [wavelengths[i] for i in idx_sorted]
 def clean_and_prepare_data(dataset, target_cols):
     """Clean and prepare data for training"""
     with st.expander("🧹 Data Preparation", expanded=True):
@@ -925,17 +1103,17 @@ def clean_and_prepare_data(dataset, target_cols):
                 clean_data[existing_targets] = clean_data[existing_targets].fillna(0)
                 st.success("✅ Missing values filled with zeros")
         
-        # Identify wavelength columns (all numeric columns except targets and Batch Number)
+        # Identify wavelength columns (all numeric columns except targets and Sample ID)
         numeric_cols = clean_data.select_dtypes(include=[np.number]).columns.tolist()
         wavelength_cols = [col for col in numeric_cols 
-                         if col not in existing_targets + ['Batch Number']]
+                         if col not in existing_targets + ['Sample ID']]
         
         st.success(f"✅ Final dataset: **{len(clean_data)}** samples with **{len(existing_targets)}** targets")
         st.info(f"📊 Spectrum features: **{len(wavelength_cols)}** wavelength points")
         
         # Show cleaned data preview
         st.markdown("### 📈 Cleaned Data Preview")
-        preview_cols = ['Batch Number'] if 'Batch Number' in clean_data.columns else []
+        preview_cols = ['Sample ID'] if 'Sample ID' in clean_data.columns else []
         preview_cols += existing_targets[:min(5, len(existing_targets))]
         st.dataframe(clean_data[preview_cols].head(), use_container_width=True)
     
@@ -946,7 +1124,7 @@ def save_model(model, model_name, wavelengths, target_cols, dataset_info, model_
     if not os.path.exists(MODELS_DIR):
         os.makedirs(MODELS_DIR)
     
-    # Determine model type
+    # تحديد نوع النموذج
     if 'PLSRegression' in str(type(model)):
         model_type_name = 'PLS'
     elif 'RandomForest' in str(type(model)):
@@ -970,7 +1148,6 @@ def save_model(model, model_name, wavelengths, target_cols, dataset_info, model_
         pickle.dump(model_data, f)
     
     return model_path
-
 def predict_with_spectrum(model_data, spectrum):
     """Make predictions using trained model and a spectrum"""
     if model_data is None or 'model' not in model_data:
@@ -1015,14 +1192,13 @@ def predict_with_spectrum(model_data, spectrum):
     except Exception as e:
         st.error(f"❌ Prediction error: {str(e)}")
         return None, None
-
-def create_spectra_plot(spectra_data, batch_numbers=None):
+def create_spectra_plot(spectra_data, sample_ids=None):
     """Create interactive spectra plot using Plotly"""
     fig = go.Figure()
     
     for idx, (name, spectrum) in enumerate(spectra_data.items()):
-        if batch_numbers:
-            label = batch_numbers[idx] if idx < len(batch_numbers) else name
+        if sample_ids:
+            label = sample_ids[idx] if idx < len(sample_ids) else name
         else:
             label = name
         
@@ -1058,15 +1234,15 @@ def create_prediction_gauge(value, target, min_val=0, max_val=100):
     # Set appropriate max values based on target
     if target == "Protein":
         max_val = 50
-    elif target == "Fat":
+    elif target == "fat":
         max_val = 30
-    elif target == "ASH":
+    elif target == "ash":
         max_val = 10
-    elif target == "Moisture":
+    elif target == "moisture":
         max_val = 10
     elif target == "Fiber":
         max_val = 10
-    elif target == "Wa":  # Water activity
+    elif target == "wa":  # Water activity?
         max_val = 1
     
     fig = go.Figure(go.Indicator(
@@ -1124,13 +1300,13 @@ with st.sidebar:
             "IAS 5100 CSV Files",
             type="csv",
             accept_multiple_files=True,
-            help="Upload NIR spectral data files"
+            help="Upload NIR spectral data files (format similar to IAS_Spectrum.csv)"
         )
         
         lab_file = st.file_uploader(
             "Lab Results",
             type=["csv", "txt"],
-            help="Upload lab results with columns: Protein, Fat, ASH, Moisture, Fiber, Wa"
+            help="Upload lab results (CSV or tab-delimited with columns: Protein, fat, ash, moisture, Fiber, wa)"
         )
         
         model_name = st.text_input(
@@ -1212,8 +1388,8 @@ if mode == "🏠 Dashboard":
         st.markdown("""
         <div class='metric-card'>
             <h3>🎯 Target Parameters</h3>
-            <p>• Protein • Fat • ASH</p>
-            <p>• Moisture • Fiber • Wa</p>
+            <p>• Protein • fat • ash</p>
+            <p>• moisture • Fiber • wa</p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1245,9 +1421,9 @@ if mode == "🏠 Dashboard":
         st.markdown("""
         **Training Process:**
         1. **Upload Data**: Select IAS 5100 files and corresponding lab results
-        2. **Data Matching**: System matches samples by Batch Number
+        2. **Data Matching**: System matches samples by Sample ID
         3. **Data Preparation**: Handle missing values and normalize spectra
-        4. **Model Training**: Train regression model (PLS, Random Forest, or XGBoost)
+        4. **Model Training**: Train PLS regression model
         5. **Save Model**: Store trained model for future use
         """)
     
@@ -1277,7 +1453,6 @@ if mode == "🏠 Dashboard":
         - View model metadata
         - Compare model performance
         """)
-
 elif mode == "🚀 Train Model":
     st.markdown("<h1>🚀 Train New Model</h1>", unsafe_allow_html=True)
     
@@ -1295,34 +1470,33 @@ elif mode == "🚀 Train Model":
         progress_bar = st.progress(0)
 
         spectra_dict = {}
-        duplicate_counter = {}  # Track duplicates per batch number
+        duplicate_counter = {}  # Track duplicates per sample ID
 
         for idx, file in enumerate(nir_files):
             with st.spinner(f"Parsing {file.name}..."):
-                # Check if this batch number already exists
+                # Check if this sample ID already exists
                 # First parse without storing to get the base ID
-                temp_spectrum, temp_batch = parse_ias_5100(file)
+                temp_spectrum, temp_id = parse_ias_5100(file)
                 
                 if not temp_spectrum.empty:
-                    base_batch = re.sub(r'_scan\d+$', '', temp_batch)  # Remove any existing _scan suffix
+                    base_id = re.sub(r'_dup\d+$', '', temp_id)  # Remove any existing _dup suffix
                     
-                    # Update counter for this base batch
-                    if base_batch in duplicate_counter:
-                        duplicate_counter[base_batch] += 1
+                    # Update counter for this base ID
+                    if base_id in duplicate_counter:
+                        duplicate_counter[base_id] += 1
                     else:
-                        duplicate_counter[base_batch] = 1
+                        duplicate_counter[base_id] = 1
                     
                     # Now parse with the correct duplicate counter
-                    spectrum, unique_batch = parse_ias_5100(file, duplicate_counter[base_batch])
-                    spectra_dict[unique_batch] = spectrum
+                    spectrum, unique_id = parse_ias_5100(file, duplicate_counter[base_id])
+                    spectra_dict[unique_id] = spectrum
                 
             progress_bar.progress((idx + 1) / len(nir_files))
 
         # Count total duplicates
         total_duplicates = sum(count - 1 for count in duplicate_counter.values() if count > 1)
         if total_duplicates > 0:
-            st.warning(f"⚠️ Found {total_duplicates} duplicate batch numbers. Each spectrum will be used separately for training with _scan suffix.")
-        
+            st.warning(f"⚠️ Found {total_duplicates} duplicate sample IDs. Each spectrum will be used separately for training with _dup suffix.")
         if len(spectra_dict) == 0:
             st.error("❌ No valid spectra found!")
             st.stop()
@@ -1334,7 +1508,7 @@ elif mode == "🚀 Train Model":
             st.stop()
         
         # Prepare training data
-        dataset, matched_batches, match_type = prepare_training_data(spectra_dict, lab_df)
+        dataset, matched_ids, match_type = prepare_training_data(spectra_dict, lab_df)
         if dataset is None:
             st.stop()
         
@@ -1346,7 +1520,7 @@ elif mode == "🚀 Train Model":
         # Extract training data
         existing_targets = [col for col in TARGET_COLS if col in clean_data.columns]
         numeric_cols = clean_data.select_dtypes(include=[np.number]).columns.tolist()
-        wavelength_cols = [col for col in numeric_cols if col not in existing_targets + ['Batch Number']]
+        wavelength_cols = [col for col in numeric_cols if col not in existing_targets + ['Sample ID']]
 
         # Check if we have enough data
         if len(clean_data) < 2:
@@ -1355,36 +1529,231 @@ elif mode == "🚀 Train Model":
 
         X = clean_data[wavelength_cols].values.astype(float)
         y = clean_data[existing_targets].values.astype(float)
-        
+        sample_ids = clean_data['Sample ID'].tolist() if 'Sample ID' in clean_data.columns else [f"sample_{i}" for i in range(len(clean_data))]
+
+        # Initialize training data arrays
+        X_train_full = X
+        y_train_full = y
+
         # ============================================
-        # TEMPERATURE COMPENSATION SECTION
+        # DATA AUGMENTATION SECTION
         # ============================================
-        st.markdown("### 🌡️ Temperature Compensation")
-        
-        use_temp_comp = st.checkbox(
-            "✅ Enable Temperature Compensation during prediction",
-            value=True,
-            help="Automatically detect and correct temperature-induced spectral shifts during prediction"
-        )
-        
-        if use_temp_comp:
-            st.info("""
-            **Temperature Compensation will:**
-            - Detect shifts in the water absorption peak (~1940 nm)
-            - Estimate sample temperature from spectral shift
-            - Correct spectrum to match model training temperature (20°C)
-            - Prevent negative water activity predictions
-            """)
+        st.markdown("### 🔬 Data Augmentation")
+        st.markdown("Enhance your dataset with synthetic spectra to improve model robustness")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            use_augmentation = st.checkbox("✅ Enable Data Augmentation", value=False, key="use_aug")
             
-            # Add temperature compensation info to model data
-            temp_comp_info = {
-                'enabled': True,
-                'reference_temperature': 20,
-                'water_peak': 1940,
-                'temp_coefficient': 0.15
-            }
+        with col2:
+            if use_augmentation:
+                augmentation_factor = st.slider(
+                    "Augmentation Multiplier",
+                    min_value=1,
+                    max_value=20,
+                    value=5,
+                    help="Number of synthetic spectra to generate per original sample"
+                )
+            else:
+                augmentation_factor = 0
+                
+        with col3:
+            if use_augmentation:
+                noise_level = st.slider(
+                    "Noise Level",
+                    min_value=0.0001,
+                    max_value=0.01,
+                    value=0.001,
+                    format="%.4f",
+                    help="Standard deviation of Gaussian noise"
+                )
+            else:
+                noise_level = 0.001
+
+        # Temperature Variation Augmentation (ADD THIS NEW SECTION)
+        if use_augmentation:
+            with st.expander("🌡️ Temperature Compensation Training", expanded=True):
+                st.markdown("""
+                **Why this matters:** Your data shows that a 2°C temperature difference 
+                shifts the water peak and causes negative predictions.
+                
+                Enable temperature-aware training to make your model robust to 
+                temperature variations.
+                """)
+                
+                use_temperature_aug = st.checkbox(
+                    "✅ Enable Temperature Variation Training",
+                    value=True,
+                    help="Train model with simulated temperature variations (±5°C)"
+                )
+                
+                if use_temperature_aug:
+                    wavelengths_float = [float(w) for w in wavelength_cols]
+                    
+                    # Create temperature-augmented dataset
+                    X_temp_aug, y_temp_aug = augment_with_temperature_variations(
+                        X, y, wavelengths_float
+                    )
+                    
+                    st.success(f"✅ Added {len(X_temp_aug) - len(X)} temperature-varied spectra")
+                    
+                    # Combine with existing data
+                    X_train_full = np.vstack([X_train_full, X_temp_aug])
+                    y_train_full = np.vstack([y_train_full, y_temp_aug])
+                    
+                    st.metric("📊 Total Training Samples", len(X_train_full))
+
+        # Show augmentation example (EXISTING CODE - KEEP THIS)
+        if use_augmentation and len(clean_data) > 0:
+            with st.expander("📊 Augmentation Preview", expanded=True):
+                # Select a random sample for demonstration
+                demo_idx = np.random.randint(0, len(clean_data))
+                demo_spectrum = pd.Series(X[demo_idx], index=[float(w) for w in wavelength_cols])
+                demo_id = sample_ids[demo_idx]
+                
+                # Generate examples
+                demo_augmented = {}
+                
+                # Noise augmentation
+                aug_spec_noise = augment_spectrum(demo_spectrum, noise_level=noise_level)
+                demo_augmented[f'Noise (σ={noise_level})'] = aug_spec_noise
+                
+                # Warping augmentation
+                aug_spec_warp = augment_with_warping(demo_spectrum, warp_factor=0.01)
+                demo_augmented['Warping'] = aug_spec_warp
+                
+                # MixUp augmentation
+                j = (demo_idx + 1) % len(clean_data)
+                spec2 = pd.Series(X[j], index=[float(w) for w in wavelength_cols])
+                aug_spec_mix, _ = augment_with_mixup(demo_spectrum, spec2, y[demo_idx], y[j])
+                demo_augmented['MixUp'] = aug_spec_mix
+                
+                # Scaling augmentation
+                aug_spec_scale = augment_spectrum(demo_spectrum, scaling_range=(0.95, 1.05))
+                demo_augmented['Scaling'] = aug_spec_scale
+                
+                # Plot example
+                fig = plot_augmentation_example(demo_spectrum, demo_augmented, demo_id)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Method selection
+                st.markdown("**Select Augmentation Methods:**")
+                aug_methods_col1, aug_methods_col2, aug_methods_col3, aug_methods_col4 = st.columns(4)
+                
+                with aug_methods_col1:
+                    use_noise = st.checkbox("Noise", value=False)
+                with aug_methods_col2:
+                    use_warp = st.checkbox("Warping", value=False)
+                with aug_methods_col3:
+                    use_mixup = st.checkbox("MixUp", value=False)
+                with aug_methods_col4:
+                    use_scale = st.checkbox("Scaling", value=True)
+                
+                st.info("""
+                **Augmentation Methods:**
+                - **Noise**: Adds Gaussian noise and baseline variations
+                - **Warping**: Small shifts in wavelength domain  
+                - **MixUp**: Creates weighted combinations of two spectra
+                - **Scaling**: Multiplicative scaling of absorbance values
+                """)
         else:
-            temp_comp_info = {'enabled': False}
+            use_noise = True
+            use_warp = True
+            use_mixup = True
+            use_scale = True
+
+
+
+        # Apply augmentation if enabled
+        if use_augmentation and augmentation_factor > 0:
+            with st.spinner("🔄 Creating augmented dataset..."):
+                wavelengths_float = [float(w) for w in wavelength_cols]
+                
+                # Create augmented dataset with selected methods
+                X_aug, y_aug, augmented_ids = create_augmented_dataset(
+                    X, y, 
+                    wavelengths_float, 
+                    sample_ids,
+                    augmentation_factor=augmentation_factor,
+                    use_noise=use_noise,
+                    use_warp=use_warp,
+                    use_mixup=use_mixup,
+                    use_scale=use_scale,
+                    noise_level=noise_level
+                )
+                
+                # Display augmentation stats
+                aug_col1, aug_col2, aug_col3, aug_col4 = st.columns(4)
+                with aug_col1:
+                    st.metric("📊 Original Samples", len(X))
+                with aug_col2:
+                    st.metric("🔄 Augmented Samples", len(X_aug) - len(X))
+                with aug_col3:
+                    st.metric("🎯 Total Samples", len(X_aug))
+                with aug_col4:
+                    augmentation_ratio = (len(X_aug) - len(X)) / len(X) * 100
+                    st.metric("📈 Augmentation Ratio", f"{augmentation_ratio:.0f}%")
+                
+                # Use augmented data for training
+                X_train_full = X_aug
+                y_train_full = y_aug
+                st.success(f"✅ Dataset augmented from {len(X)} to {len(X_aug)} samples!")
+                
+                # Show sample of augmented IDs
+                with st.expander("🔍 View Augmented Sample IDs"):
+                    st.write("**First 20 augmented samples:**")
+                    st.write(augmented_ids[:20])
+        else:
+            X_train_full = X
+            y_train_full = y
+            st.info("ℹ️ Using original dataset without augmentation")
+
+        # Apply SNV normalization
+        X_snv = apply_snv(X_train_full)
+
+        # Train model
+        st.markdown("### 🤖 Training Model")
+
+        # Adjust PLS components based on augmented data
+        n_components = min(15, X_snv.shape[0] - 1, X_snv.shape[1])  # Increased max components
+        n_components = max(1, n_components)
+
+        # Split data - use original indices for test set if augmented
+        if use_augmentation:
+            # Use only original samples for test set to avoid data leakage
+            test_size = min(0.2, max(0.05, 1/len(X)))
+            
+            # Ensure test_size is valid
+            if test_size >= 1.0:
+                test_size = 0.2
+            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X[:len(X)], y[:len(X)], test_size=test_size, random_state=42
+            )
+            
+            # Combine original training data with augmented data for training
+            X_train_final = np.vstack([X_train, X_aug[len(X):]])
+            y_train_final = np.vstack([y_train, y_aug[len(X):]])
+            
+        else:
+            test_size = min(0.2, max(0.05, 1/len(clean_data)))
+            if test_size >= 1.0:
+                test_size = 0.2
+                
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_snv, y, test_size=test_size, random_state=42
+            )
+            X_train_final = X_train
+            y_train_final = y_train
+
+        # Apply SNV to training data
+        if use_augmentation:
+            X_train_snv = apply_snv(X_train_final)
+            X_test_snv = apply_snv(X_test)
+        else:
+            X_train_snv = X_train
+            X_test_snv = X_test
 
         # ============================================
         # MODEL SELECTION SECTION
@@ -1396,63 +1765,77 @@ elif mode == "🚀 Train Model":
         
         with st.spinner(f"Training {model_type.split('(')[0].strip()} model..."):
             
-            # Split data
-            test_size = min(0.2, max(0.05, 1/len(clean_data)))
-            if test_size >= 1.0:
-                test_size = 0.2
-            
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=42
-            )
-            
-            # Choose appropriate model
+            # اختيار النموذج المناسب
             if "Random Forest" in model_type:
-                # Random Forest doesn't need normalization
-                model = MultiOutputRegressor(
-                    RandomForestRegressor(
-                        n_estimators=model_params.get('n_estimators', 200),
-                        max_depth=model_params.get('max_depth', 15),
-                        min_samples_split=model_params.get('min_samples_split', 5),
-                        min_samples_leaf=model_params.get('min_samples_leaf', 2),
-                        random_state=42,
-                        n_jobs=-1
-                    )
+                # Random Forest لا يحتاج تطبيع
+                if use_augmentation:
+                    X_train_final_rf = X_train_final
+                    X_test_rf = X_test
+                else:
+                    X_train_final_rf = X_train
+                    X_test_rf = X_test
+                
+                # تدريب Random Forest مع MultiOutput
+                base_model = RandomForestRegressor(
+                    n_estimators=model_params.get('n_estimators', 200),
+                    max_depth=model_params.get('max_depth', 15),
+                    min_samples_split=model_params.get('min_samples_split', 5),
+                    min_samples_leaf=model_params.get('min_samples_leaf', 2),
+                    random_state=42,
+                    n_jobs=-1
                 )
-                model.fit(X_train, y_train)
-                X_train_eval = X_train
-                X_test_eval = X_test
+                model = MultiOutputRegressor(base_model)
+                model.fit(X_train_final_rf, y_train_final)
+                
+                # للتقييم
+                X_test_eval = X_test_rf
                 
             elif "XGBoost" in model_type:
-                # XGBoost doesn't need normalization
-                model = MultiOutputRegressor(
-                    XGBRegressor(
-                        n_estimators=model_params.get('n_estimators', 200),
-                        learning_rate=model_params.get('learning_rate', 0.1),
-                        max_depth=model_params.get('max_depth', 6),
-                        subsample=model_params.get('subsample', 0.8),
-                        random_state=42,
-                        n_jobs=-1
-                    )
+                # XGBoost لا يحتاج تطبيع
+                if use_augmentation:
+                    X_train_final_xgb = X_train_final
+                    X_test_xgb = X_test
+                else:
+                    X_train_final_xgb = X_train
+                    X_test_xgb = X_test
+                
+                # تدريب XGBoost مع MultiOutput
+                base_model = XGBRegressor(
+                n_estimators=model_params.get('n_estimators', 200),
+                learning_rate=model_params.get('learning_rate', 0.1),
+                max_depth=model_params.get('max_depth', 6),
+                subsample=model_params.get('subsample', 0.8),
+                random_state=42,
+                n_jobs=-1,
+                tree_method="hist"   # CPU safe
                 )
-                model.fit(X_train, y_train)
-                X_train_eval = X_train
-                X_test_eval = X_test
+
+                # base_model = XGBRegressor(
+                #     n_estimators=model_params.get('n_estimators', 200),
+                #     learning_rate=model_params.get('learning_rate', 0.1),
+                #     max_depth=model_params.get('max_depth', 6),
+                #     subsample=model_params.get('subsample', 0.8),
+                #     random_state=42,
+                #     n_jobs=-1
+                # )
+                model = MultiOutputRegressor(base_model)
+                model.fit(X_train_final_xgb, y_train_final)
                 
-            else:  # PLS - APPLY SNV FOR PLS ONLY
-                n_components = min(15, X_train.shape[0] - 1, X_train.shape[1])
-                n_components = max(1, n_components)
+                # للتقييم
+                X_test_eval = X_test_xgb
                 
-                # Apply SNV normalization for PLS
-                X_train_snv = apply_snv(X_train)
+            else:  # PLS
+                # PLS يحتاج تطبيع
+                X_train_snv = apply_snv(X_train_final)
                 X_test_snv = apply_snv(X_test)
                 
                 model = PLSRegression(n_components=n_components)
-                model.fit(X_train_snv, y_train)
+                model.fit(X_train_snv, y_train_final)
                 
-                X_train_eval = X_train_snv
+                # للتقييم
                 X_test_eval = X_test_snv
         
-        # Model name for display
+        # اسم النموذج للعرض
         model_display_name = model_type.split('(')[0].strip()
         st.success(f"✅ {model_display_name} model trained successfully!")
         
@@ -1478,7 +1861,7 @@ elif mode == "🚀 Train Model":
                     test_mae = mean_absolute_error(y_test[:, i], y_pred[:, i])
                     test_mape = np.mean(np.abs((y_test[:, i] - y_pred[:, i]) / (y_test[:, i] + 1e-10))) * 100
                     
-                    # Status emoji
+                  # Status emoji
                     if test_r2 > 0.8:
                         status = "🏆 Excellent"
                     elif test_r2 > 0.7:
@@ -1520,40 +1903,40 @@ elif mode == "🚀 Train Model":
                         }
                     ))
                     fig_gauge.update_layout(height=200, margin=dict(l=20, r=20, t=50, b=20))
-                    st.plotly_chart(fig_gauge, use_container_width=True, key=f"gauge_{target}_{i}")
+                    st.plotly_chart(fig_gauge, use_container_width=True)
         
-        # Display metrics in table
+        # عرض المقاييس في جدول
         if metrics_data:
             metrics_df = pd.DataFrame(metrics_data)
             st.dataframe(metrics_df, use_container_width=True)
             
             # ============================================
-            # FEATURE IMPORTANCE (for Random Forest only)
+            # FEATURE IMPORTANCE (لـ Random Forest فقط)
             # ============================================
             if "Random Forest" in model_type and hasattr(model, 'estimators_'):
-                with st.expander("🌲 Feature Importance (Wavelength Importance)", expanded=True):
+                with st.expander("🌲 أهمية الأطوال الموجية (Feature Importance)", expanded=True):
                     st.markdown("""
-                    **These are the most important wavelengths for prediction:**
-                    Higher importance means more influential for the model.
+                    **هذه أهم الأطوال الموجية في توقع المكونات:**
+                    كلما زاد الطول، كلما كان أكثر أهمية للنموذج.
                     """)
                     
-                    # Calculate average importance across all targets
+                    # حساب متوسط الأهمية لكل الأهداف
                     all_importances = []
                     for estimator in model.estimators_:
                         all_importances.append(estimator.feature_importances_)
                     
                     avg_importance = np.mean(all_importances, axis=0)
                     
-                    # Sort wavelengths by importance
+                    # ترتيب الأطوال الموجية حسب الأهمية
                     wavelengths_float = [float(w) for w in wavelength_cols]
                     importance_df = pd.DataFrame({
                         'Wavelength (nm)': wavelengths_float,
                         'Importance': avg_importance
                     }).sort_values('Importance', ascending=False)
                     
-                    # Show top 20 wavelengths
+                    # عرض أهم 20 طول موجي
                     top_n = min(20, len(importance_df))
-                    st.markdown(f"**🔝 Top {top_n} Wavelengths:**")
+                    st.markdown(f"**🔝 أهم {top_n} طول موجي:**")
                     
                     fig_importance = px.bar(
                         importance_df.head(top_n),
@@ -1565,9 +1948,8 @@ elif mode == "🚀 Train Model":
                     )
                     st.plotly_chart(fig_importance, use_container_width=True)
                     
-                    # Display in table
+                    # عرض في جدول
                     st.dataframe(importance_df.head(10), use_container_width=True)
-        
         # Save model
         st.markdown("### 💾 Save Model")
         
@@ -1583,12 +1965,14 @@ elif mode == "🚀 Train Model":
             if st.button("💾 Save Model", type="primary", use_container_width=True):
                 dataset_info = {
                     'n_samples': len(clean_data),
+                    'n_augmented_samples': len(X_train_full) - len(clean_data) if use_augmentation else 0,
                     'n_wavelengths': len(wavelength_cols),
                     'targets': existing_targets,
-                    'batch_numbers': clean_data['Batch Number'].tolist() if 'Batch Number' in clean_data.columns else [],
+                    'sample_ids': clean_data['Sample ID'].tolist() if 'Sample ID' in clean_data.columns else [],
                     'created_date': datetime.now().isoformat(),
-                    'model_metrics': metrics_data if metrics_data else [],
-                    'temperature_compensation': temp_comp_info
+                    'augmentation_used': use_augmentation,
+                    'augmentation_factor': augmentation_factor if use_augmentation else 0,
+                    'model_metrics': metrics_data if metrics_data else []
                 }
                 
                 model_path = save_model(model, model_name_input, wavelength_cols, existing_targets, dataset_info, model_type)
@@ -1597,8 +1981,7 @@ elif mode == "🚀 Train Model":
                     'model': model,
                     'wavelengths': wavelength_cols,
                     'target_cols': existing_targets,
-                    'dataset_info': dataset_info,
-                    'temperature_compensation': temp_comp_info
+                    'dataset_info': dataset_info
                 }
                 
                 st.success(f"✅ Model saved as `{model_name_input}`!")
@@ -1622,14 +2005,14 @@ elif mode == "🚀 Train Model":
             ### 📁 Required Files
             
             **1. IAS 5100 CSV files**
-            - NIR spectral data with Batch Number
+            - NIR spectral data with Sample ID
             - Format similar to IAS_Spectrum.csv
             - Supports multiple files
             
             **2. Lab Results file**
             - CSV or tab-delimited format
-            - Must contain Batch Number column
-            - Target columns: Protein, Fat, ASH, Moisture, Fiber, Wa
+            - Must contain Sample ID column
+            - Target columns: Protein, fat, ash, moisture, Fiber, wa
             """)
             
         with inst_col2:
@@ -1637,35 +2020,34 @@ elif mode == "🚀 Train Model":
             ### 🎯 Features
             
             **Data Processing:**
-            - Automatic Batch Number matching
-            - Duplicate handling with _scan suffix
+            - Automatic Sample ID matching
+            - Duplicate handling with _dup suffix
             - Missing value imputation
-            - SNV normalization for PLS models
+            - SNV normalization
             
-            **Temperature Compensation:**
-            - Detects water peak shifts
-            - Estimates sample temperature
-            - Corrects spectra during prediction
-            - Prevents negative water activity
+            **Data Augmentation:**
+            - Gaussian noise injection
+            - Wavelength warping
+            - MixUp combinations
+            - Scaling augmentation
             
             **Model Training:**
-            - PLS regression (with SNV)
-            - Random Forest (no normalization)
-            - XGBoost (no normalization)
-            - Automatic train/test split
+            - PLS regression
+            - Automatic component selection
+            - Train/test split
             - Performance metrics
             """)
         
         st.markdown("### 📋 Lab File Format Example")
         
         example_data = {
-            'Batch Number': ['B2600041_01', 'B2600042', 'B2500094'],
-            'Protein': [23, 25, 30],
-            'Fat': [21, 18, 13],
-            'ASH': [4.6, 5.2, 5.6],
-            'Moisture': [5, 5.8, 6.3],
-            'Fiber': [3.49, 3.2, 3.35],
-            'Wa': [0.4, 0.45, 0.47]
+            'Sample ID': ['B2600041_01', 'B2600041_02', 'B2500012'],
+            'Protein': [23, 23, 30],
+            'fat': [21, 21, 13],
+            'ash': [4.6, 4.6, 5.6],
+            'moisture': [5, 5, 6.3],
+            'Fiber': [3.49, 3.49, 3.35],
+            'wa': [0.4, 0.4, 0.47]
         }
         
         example_df = pd.DataFrame(example_data)
@@ -1674,7 +2056,6 @@ elif mode == "🚀 Train Model":
         st.info("""
         👆 **Ready to start?** Upload your NIR files and lab results file using the sidebar to begin training.
         """)
-
 elif mode == "🔮 Predict":
     st.markdown("<h1>🔮 Make Predictions</h1>", unsafe_allow_html=True)
     
@@ -1688,29 +2069,17 @@ elif mode == "🔮 Predict":
                 
         for file in nir_files:
             with st.expander(f"📄 {file.name}", expanded=True):
-                spectrum, batch_num = parse_ias_5100(file)
+                spectrum, sn = parse_ias_5100(file)
                 
                 if not spectrum.empty:
                     if st.session_state.model_data:
-                        # Check if temperature compensation is enabled
-                        temp_comp_enabled = st.session_state.model_data.get('temperature_compensation', {}).get('enabled', False)
-                        
-                        if temp_comp_enabled:
-                            # Use robust prediction with temperature compensation
-                            result_df, correction_info, negative_detected = predict_with_temperature_compensation(
-                                st.session_state.model_data, 
-                                spectrum
-                            )
-                            
-                            if negative_detected:
-                                st.warning("⚠️ Negative water activity detected and corrected")
-                        else:
-                            # Use standard prediction
-                            result_df, _ = predict_with_spectrum(st.session_state.model_data, spectrum)
-                            negative_detected = False
+                        result_df, aligned_spectrum = predict_with_spectrum(
+                            st.session_state.model_data, 
+                            spectrum
+                        )
                         
                         if result_df is not None:
-                            st.success(f"✅ Predictions for Batch: {batch_num}")
+                            st.success(f"✅ Predictions for {sn}")
                             
                             # Display predictions as gauges
                             st.markdown("### 🎯 Predicted Values")
@@ -1727,36 +2096,37 @@ elif mode == "🔮 Predict":
                                             min_val=0,
                                             max_val=100
                                         )
+                                        # FIX: Add unique key using file name and column name
                                         st.plotly_chart(
                                             fig, 
                                             use_container_width=True,
-                                            key=f"gauge_pred_{file.name}_{col_name}_{idx}"
+                                            key=f"gauge_{file.name}_{col_name}_{idx}"
                                         )
                                     
                             # Add to summary
                             prediction_row = result_df.copy()
                             prediction_row['File'] = file.name
-                            prediction_row['Batch Number'] = batch_num
+                            prediction_row['Sample ID'] = sn
                             all_predictions.append(prediction_row)
                             
                             # Plot spectrum
                             st.markdown("### 📈 Spectrum")
                             fig = go.Figure()
                             fig.add_trace(go.Scatter(
-                                x=spectrum.index,
-                                y=spectrum.values,
+                                x=aligned_spectrum.index,
+                                y=aligned_spectrum.values,
                                 mode='lines',
                                 line=dict(color='#764ba2', width=2),
                                 name='Spectrum'
                             ))
                             fig.update_layout(
-                                title=f"Spectrum: {batch_num}",
+                                title=f"Spectrum: {sn}",
                                 xaxis_title="Wavelength (nm)",
                                 yaxis_title="Absorbance",
                                 template="plotly_white",
                                 height=400
                             )
-                            st.plotly_chart(fig, use_container_width=True, key=f"spec_{file.name}")
+                            st.plotly_chart(fig, use_container_width=True)
         
         # Summary
         if all_predictions:
@@ -1764,7 +2134,7 @@ elif mode == "🔮 Predict":
             summary_df = pd.concat(all_predictions, ignore_index=True)
             
             target_cols = st.session_state.model_data['target_cols']
-            display_cols = ['Batch Number', 'File'] + target_cols
+            display_cols = ['Sample ID', 'File'] + target_cols
             display_cols = [col for col in display_cols if col in summary_df.columns]
             
             st.dataframe(summary_df[display_cols], use_container_width=True)
@@ -1821,11 +2191,6 @@ elif mode == "📚 Models":
                     with col3:
                         created_date = model_data.get('created_date', '').split('T')[0]
                         st.metric("Created", created_date)
-                    
-                    # Show temperature compensation status
-                    temp_comp = model_data.get('temperature_compensation', {}).get('enabled', False)
-                    if temp_comp:
-                        st.info("🌡️ Temperature Compensation Enabled")
                     
                     if model_data.get('target_cols'):
                         st.markdown("**Target Parameters:**")
@@ -1884,4 +2249,4 @@ st.markdown(
     "🧪 AI Feed Lab Prediction System • Version 2.0 • Modern UI Edition"
     "</div>",
     unsafe_allow_html=True
-)
+) 

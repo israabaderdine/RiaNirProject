@@ -18,7 +18,7 @@ from datetime import datetime
 import warnings
 import re
 
-# Suppress warnings ch8ale fiha 3 model ma3 augemnation
+# Suppress warnings py -m streamlit run app.py
 warnings.filterwarnings('ignore')
 
 # ==============================
@@ -281,6 +281,67 @@ def predict_with_robustness_check(model_data, spectrum, sample_temperature=None)
     
     return predictions, correction_info
 
+def augment_with_temperature_variations(X, y, wavelengths, temperatures=None):
+    """
+    Augment training data with simulated temperature variations
+    
+    Parameters:
+    - X: original spectra
+    - y: target values
+    - wavelengths: wavelength points (list or array)
+    - temperatures: measured temperatures (or None to simulate)
+    
+    Returns:
+    - X_aug, y_aug: augmented dataset with temperature variations
+    """
+    augmented_spectra = []
+    augmented_targets = []
+    
+    # Temperature variations to simulate (±0°C to ±5°C)
+    temp_variations = [-5, -3, -2, -1, 0, 1, 2, 3, 5]
+    
+    # Convert wavelengths to numpy array for mathematical operations
+    wavelengths_array = np.array(wavelengths, dtype=float)
+    
+    for i in range(X.shape[0]):
+        spectrum = pd.Series(X[i], index=wavelengths_array)
+        
+        for temp_shift in temp_variations:
+            # Simulate temperature-induced shift
+            shifted_wavelengths = wavelengths_array - (temp_shift * 0.15)
+            
+            # Interpolate - ensure shifted_wavelengths is sorted
+            # np.interp requires x-coordinates to be increasing
+            sorted_indices = np.argsort(shifted_wavelengths)
+            shifted_wavelengths_sorted = shifted_wavelengths[sorted_indices]
+            spectrum_values_sorted = spectrum.values[sorted_indices]
+            
+            # Interpolate back to original wavelengths
+            shifted_values = np.interp(
+                wavelengths_array, 
+                shifted_wavelengths_sorted, 
+                spectrum_values_sorted
+            )
+            
+            augmented_spectrum = pd.Series(shifted_values, index=wavelengths_array)
+            
+            # Add small noise
+            noise = np.random.normal(0, 0.0005, len(wavelengths_array))
+            augmented_spectrum = augmented_spectrum + noise
+            
+            augmented_spectra.append(augmented_spectrum.values)
+            augmented_targets.append(y[i])
+    
+    # Stack arrays
+    if augmented_spectra:
+        X_aug = np.vstack([X] + augmented_spectra)
+        y_aug = np.vstack([y] + augmented_targets)
+    else:
+        X_aug = X
+        y_aug = y
+    
+    return X_aug, y_aug
+
 def visualize_temperature_shift(spectrum, correction_info):
     """Visualize the temperature-induced spectral shift"""
     fig = go.Figure()
@@ -319,6 +380,208 @@ def visualize_temperature_shift(spectrum, correction_info):
         yaxis_title="Absorbance",
         template="plotly_white",
         height=400
+    )
+    
+    return fig
+
+def augment_spectrum(spectrum, noise_level=0.001, shift_max=1, scaling_range=(0.98, 1.02)):
+    """
+    Apply multiple augmentation techniques to a single spectrum
+    
+    Parameters:
+    - spectrum: pandas Series with wavelength index
+    - noise_level: standard deviation of Gaussian noise
+    - shift_max: maximum wavelength shift in nm
+    - scaling_range: min/max for multiplicative scaling
+    """
+    augmented = spectrum.copy()
+    
+    # 1. Add Gaussian noise
+    if noise_level > 0:
+        noise = np.random.normal(0, noise_level, len(spectrum))
+        augmented = augmented + noise
+    
+    # 2. Multiplicative scaling
+    scale_factor = np.random.uniform(scaling_range[0], scaling_range[1])
+    augmented = augmented * scale_factor
+    
+    # 3. Baseline shift
+    baseline_shift = np.random.normal(0, noise_level * 10)
+    augmented = augmented + baseline_shift
+    
+    return augmented
+
+def augment_with_warping(spectrum, warp_factor=0.01):
+    """
+    Apply wavelength warping (small shifts in wavelength domain)
+    """
+    wavelengths = spectrum.index.values
+    new_wavelengths = wavelengths * (1 + np.random.uniform(-warp_factor, warp_factor))
+    
+    # Interpolate back to original wavelengths
+    warped_spectrum = pd.Series(
+        np.interp(wavelengths, new_wavelengths, spectrum.values),
+        index=wavelengths
+    )
+    
+    return warped_spectrum
+
+def augment_with_mixup(spectrum1, spectrum2, y1, y2, alpha=0.2):
+    """
+    MixUp augmentation: create weighted combination of two spectra and their labels
+    
+    Parameters:
+    - spectrum1, spectrum2: pandas Series with wavelength index
+    - y1, y2: target values for each spectrum
+    - alpha: Beta distribution parameter
+    """
+    lambda_val = np.random.beta(alpha, alpha)
+    
+    # Mix spectra
+    mixed_spectrum = lambda_val * spectrum1 + (1 - lambda_val) * spectrum2
+    
+    # Mix labels
+    mixed_y = lambda_val * y1 + (1 - lambda_val) * y2
+    
+    return mixed_spectrum, mixed_y
+
+def create_augmented_dataset(X, y, wavelengths, batch_numbers, augmentation_factor=3, 
+                            use_noise=True, use_warp=True, use_mixup=True, use_scale=True,
+                            noise_level=0.001):
+    """
+    Create augmented dataset with multiple techniques
+    
+    Parameters:
+    - X: original spectra matrix (n_samples, n_features)
+    - y: target values matrix (n_samples, n_targets)
+    - wavelengths: list of wavelength values
+    - batch_numbers: list of batch numbers
+    - augmentation_factor: multiplier for dataset size
+    - use_noise: whether to use noise augmentation
+    - use_warp: whether to use wavelength warping
+    - use_mixup: whether to use MixUp augmentation
+    - use_scale: whether to use scaling augmentation
+    - noise_level: standard deviation for Gaussian noise
+    
+    Returns:
+    - X_aug, y_aug, augmented_batch_numbers
+    """
+    augmented_spectra = []
+    augmented_targets = []
+    augmented_batches = []
+    
+    n_samples = X.shape[0]
+    n_targets = y.shape[1] if len(y.shape) > 1 else 1
+    
+    # Collect available methods
+    available_methods = []
+    if use_noise:
+        available_methods.append('noise')
+    if use_warp:
+        available_methods.append('warp')
+    if use_mixup:
+        available_methods.append('mixup')
+    if use_scale:
+        available_methods.append('scale')
+    
+    # Default to noise if no methods selected
+    if not available_methods:
+        available_methods = ['noise']
+    
+    # Create augmented samples
+    for i in range(n_samples):
+        # Original spectrum as Series
+        spectrum = pd.Series(X[i], index=wavelengths)
+        
+        # Create multiple augmented versions
+        for aug_idx in range(augmentation_factor):
+            # Randomly choose augmentation method
+            method = np.random.choice(available_methods)
+            
+            if method == 'noise':
+                aug_spectrum = augment_spectrum(
+                    spectrum, 
+                    noise_level=noise_level
+                )
+                aug_y = y[i].copy()
+                
+            elif method == 'warp':
+                aug_spectrum = augment_with_warping(
+                    spectrum,
+                    warp_factor=np.random.uniform(0.005, 0.02)
+                )
+                aug_y = y[i].copy()
+                
+            elif method == 'mixup':
+                # Mix with another random sample
+                j = np.random.randint(0, n_samples)
+                while j == i:
+                    j = np.random.randint(0, n_samples)
+                
+                spectrum2 = pd.Series(X[j], index=wavelengths)
+                aug_spectrum, aug_y = augment_with_mixup(
+                    spectrum, spectrum2,
+                    y[i], y[j],
+                    alpha=0.2
+                )
+                
+            elif method == 'scale':
+                # Scaling augmentation
+                aug_spectrum = augment_spectrum(
+                    spectrum,
+                    noise_level=0,  # No noise
+                    scaling_range=(0.95, 1.05)
+                )
+                aug_y = y[i].copy()
+            
+            # Ensure no NaN values
+            if aug_spectrum.isna().any():
+                aug_spectrum = aug_spectrum.interpolate(method='linear')
+                aug_spectrum = aug_spectrum.bfill().ffill()
+            
+            augmented_spectra.append(aug_spectrum.values)
+            augmented_targets.append(aug_y)
+            augmented_batches.append(f"{batch_numbers[i]}_aug{aug_idx+1}")
+    
+    # Combine original and augmented data
+    X_aug = np.vstack([X, np.array(augmented_spectra)])
+    y_aug = np.vstack([y, np.array(augmented_targets)])
+    all_batch_numbers = list(batch_numbers) + augmented_batches
+    
+    return X_aug, y_aug, all_batch_numbers
+
+def plot_augmentation_example(original_spectrum, augmented_spectra, batch_number):
+    """Plot original vs augmented spectra for visualization"""
+    fig = go.Figure()
+    
+    # Original spectrum
+    fig.add_trace(go.Scatter(
+        x=original_spectrum.index,
+        y=original_spectrum.values,
+        mode='lines',
+        name=f'Original {batch_number}',
+        line=dict(color='#764ba2', width=3)
+    ))
+    
+    # Augmented spectra
+    colors = ['#10B981', '#F59E0B', '#EF4444', '#3B82F6']
+    for idx, (name, aug_spec) in enumerate(augmented_spectra.items()):
+        fig.add_trace(go.Scatter(
+            x=aug_spec.index,
+            y=aug_spec.values,
+            mode='lines',
+            name=name,
+            line=dict(color=colors[idx % len(colors)], width=1.5, dash='dot'),
+            opacity=0.7
+        ))
+    
+    fig.update_layout(
+        title=f"Data Augmentation Example - {batch_number}",
+        xaxis_title="Wavelength (nm)",
+        yaxis_title="Absorbance",
+        template="plotly_white",
+        hovermode='x unified',
+        height=500
     )
     
     return fig
@@ -412,8 +675,12 @@ def parse_ias_5100(file, duplicate_counter=None):
                 # Try tab delimiter
                 df = pd.read_csv(io.StringIO(spectrum_data), sep='\t')
             except:
-                # Try space delimiter
-                df = pd.read_csv(io.StringIO(spectrum_data), sep='\s+')
+                try:
+                    # Try space delimiter
+                    df = pd.read_csv(io.StringIO(spectrum_data), sep='\s+')
+                except:
+                    # Try semicolon delimiter
+                    df = pd.read_csv(io.StringIO(spectrum_data), sep=';')
         
         # Identify wavelength and absorbance columns
         wavelength_col = None
@@ -589,7 +856,7 @@ def load_lab_data(lab_file):
         with col1:
             st.metric("Total Rows", len(lab_df))
         with col2:
-            st.metric("Unique Batches", lab_df['Batch Number'].nunique())
+            st.metric("Unique Batch Numbers", lab_df['Batch Number'].nunique())
         with col3:
             st.metric("Target Columns", len(found_targets))
         
@@ -1355,36 +1622,229 @@ elif mode == "🚀 Train Model":
 
         X = clean_data[wavelength_cols].values.astype(float)
         y = clean_data[existing_targets].values.astype(float)
-        
+        batch_numbers = clean_data['Batch Number'].tolist() if 'Batch Number' in clean_data.columns else [f"batch_{i}" for i in range(len(clean_data))]
+
+        # Initialize training data arrays
+        X_train_full = X
+        y_train_full = y
+
         # ============================================
-        # TEMPERATURE COMPENSATION SECTION
+        # DATA AUGMENTATION SECTION
         # ============================================
-        st.markdown("### 🌡️ Temperature Compensation")
-        
-        use_temp_comp = st.checkbox(
-            "✅ Enable Temperature Compensation during prediction",
-            value=True,
-            help="Automatically detect and correct temperature-induced spectral shifts during prediction"
-        )
-        
-        if use_temp_comp:
-            st.info("""
-            **Temperature Compensation will:**
-            - Detect shifts in the water absorption peak (~1940 nm)
-            - Estimate sample temperature from spectral shift
-            - Correct spectrum to match model training temperature (20°C)
-            - Prevent negative water activity predictions
-            """)
+        st.markdown("### 🔬 Data Augmentation")
+        st.markdown("Enhance your dataset with synthetic spectra to improve model robustness")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            use_augmentation = st.checkbox("✅ Enable Data Augmentation", value=False, key="use_aug")
             
-            # Add temperature compensation info to model data
-            temp_comp_info = {
-                'enabled': True,
-                'reference_temperature': 20,
-                'water_peak': 1940,
-                'temp_coefficient': 0.15
-            }
+        with col2:
+            if use_augmentation:
+                augmentation_factor = st.slider(
+                    "Augmentation Multiplier",
+                    min_value=1,
+                    max_value=20,
+                    value=5,
+                    help="Number of synthetic spectra to generate per original sample"
+                )
+            else:
+                augmentation_factor = 0
+                
+        with col3:
+            if use_augmentation:
+                noise_level = st.slider(
+                    "Noise Level",
+                    min_value=0.0001,
+                    max_value=0.01,
+                    value=0.001,
+                    format="%.4f",
+                    help="Standard deviation of Gaussian noise"
+                )
+            else:
+                noise_level = 0.001
+
+        # Temperature Variation Augmentation
+        if use_augmentation:
+            with st.expander("🌡️ Temperature Compensation Training", expanded=True):
+                st.markdown("""
+                **Why this matters:** Your data shows that a 2°C temperature difference 
+                shifts the water peak and can cause negative predictions.
+                
+                Enable temperature-aware training to make your model robust to 
+                temperature variations.
+                """)
+                
+                use_temperature_aug = st.checkbox(
+                    "✅ Enable Temperature Variation Training",
+                    value=True,
+                    help="Train model with simulated temperature variations (±5°C)"
+                )
+                
+                if use_temperature_aug:
+                    wavelengths_float = [float(w) for w in wavelength_cols]
+                    
+                    # Create temperature-augmented dataset
+                    X_temp_aug, y_temp_aug = augment_with_temperature_variations(
+                        X, y, wavelengths_float
+                    )
+                    
+                    st.success(f"✅ Added {len(X_temp_aug) - len(X)} temperature-varied spectra")
+                    
+                    # Combine with existing data
+                    X_train_full = np.vstack([X_train_full, X_temp_aug])
+                    y_train_full = np.vstack([y_train_full, y_temp_aug])
+                    
+                    st.metric("📊 Total Training Samples", len(X_train_full))
+
+        # Show augmentation example
+        if use_augmentation and len(clean_data) > 0:
+            with st.expander("📊 Augmentation Preview", expanded=True):
+                # Select a random sample for demonstration
+                demo_idx = np.random.randint(0, len(clean_data))
+                demo_spectrum = pd.Series(X[demo_idx], index=[float(w) for w in wavelength_cols])
+                demo_batch = batch_numbers[demo_idx]
+                
+                # Generate examples
+                demo_augmented = {}
+                
+                # Noise augmentation
+                aug_spec_noise = augment_spectrum(demo_spectrum, noise_level=noise_level)
+                demo_augmented[f'Noise (σ={noise_level})'] = aug_spec_noise
+                
+                # Warping augmentation
+                aug_spec_warp = augment_with_warping(demo_spectrum, warp_factor=0.01)
+                demo_augmented['Warping'] = aug_spec_warp
+                
+                # MixUp augmentation
+                j = (demo_idx + 1) % len(clean_data)
+                spec2 = pd.Series(X[j], index=[float(w) for w in wavelength_cols])
+                aug_spec_mix, _ = augment_with_mixup(demo_spectrum, spec2, y[demo_idx], y[j])
+                demo_augmented['MixUp'] = aug_spec_mix
+                
+                # Scaling augmentation
+                aug_spec_scale = augment_spectrum(demo_spectrum, scaling_range=(0.95, 1.05))
+                demo_augmented['Scaling'] = aug_spec_scale
+                
+                # Plot example
+                fig = plot_augmentation_example(demo_spectrum, demo_augmented, demo_batch)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Method selection
+                st.markdown("**Select Augmentation Methods:**")
+                aug_methods_col1, aug_methods_col2, aug_methods_col3, aug_methods_col4 = st.columns(4)
+                
+                with aug_methods_col1:
+                    use_noise = st.checkbox("Noise", value=True)
+                with aug_methods_col2:
+                    use_warp = st.checkbox("Warping", value=True)
+                with aug_methods_col3:
+                    use_mixup = st.checkbox("MixUp", value=True)
+                with aug_methods_col4:
+                    use_scale = st.checkbox("Scaling", value=True)
+                
+                st.info("""
+                **Augmentation Methods:**
+                - **Noise**: Adds Gaussian noise and baseline variations
+                - **Warping**: Small shifts in wavelength domain  
+                - **MixUp**: Creates weighted combinations of two spectra
+                - **Scaling**: Multiplicative scaling of absorbance values
+                """)
         else:
-            temp_comp_info = {'enabled': False}
+            use_noise = True
+            use_warp = True
+            use_mixup = True
+            use_scale = True
+
+        # Apply augmentation if enabled
+        if use_augmentation and augmentation_factor > 0:
+            with st.spinner("🔄 Creating augmented dataset..."):
+                wavelengths_float = [float(w) for w in wavelength_cols]
+                
+                # Create augmented dataset with selected methods
+                X_aug, y_aug, augmented_batch_numbers = create_augmented_dataset(
+                    X, y, 
+                    wavelengths_float, 
+                    batch_numbers,
+                    augmentation_factor=augmentation_factor,
+                    use_noise=use_noise,
+                    use_warp=use_warp,
+                    use_mixup=use_mixup,
+                    use_scale=use_scale,
+                    noise_level=noise_level
+                )
+                
+                # Display augmentation stats
+                aug_col1, aug_col2, aug_col3, aug_col4 = st.columns(4)
+                with aug_col1:
+                    st.metric("📊 Original Samples", len(X))
+                with aug_col2:
+                    st.metric("🔄 Augmented Samples", len(X_aug) - len(X))
+                with aug_col3:
+                    st.metric("🎯 Total Samples", len(X_aug))
+                with aug_col4:
+                    augmentation_ratio = (len(X_aug) - len(X)) / len(X) * 100
+                    st.metric("📈 Augmentation Ratio", f"{augmentation_ratio:.0f}%")
+                
+                # Use augmented data for training
+                X_train_full = X_aug
+                y_train_full = y_aug
+                st.success(f"✅ Dataset augmented from {len(X)} to {len(X_aug)} samples!")
+                
+                # Show sample of augmented batch numbers
+                with st.expander("🔍 View Augmented Batch Numbers"):
+                    st.write("**First 20 augmented samples:**")
+                    st.write(augmented_batch_numbers[:20])
+        else:
+            X_train_full = X
+            y_train_full = y
+            st.info("ℹ️ Using original dataset without augmentation")
+
+        # Apply SNV normalization
+        X_snv = apply_snv(X_train_full)
+
+        # Train model
+        st.markdown("### 🤖 Training Model")
+
+        # Adjust PLS components based on augmented data
+        n_components = min(15, X_snv.shape[0] - 1, X_snv.shape[1])
+        n_components = max(1, n_components)
+
+        # Split data - use original indices for test set if augmented
+        if use_augmentation:
+            # Use only original samples for test set to avoid data leakage
+            test_size = 0.05
+            
+            # Ensure test_size is valid
+            # if test_size >= 1.0:
+            #     test_size = 0.2
+            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X[:len(X)], y[:len(X)], test_size=test_size, random_state=42
+            )
+            
+            # Combine original training data with augmented data for training
+            X_train_final = np.vstack([X_train, X_aug[len(X):]])
+            y_train_final = np.vstack([y_train, y_aug[len(X):]])
+            
+        else:
+            # test_size = min(0.2, max(0.05, 1/len(clean_data)))
+            # if test_size >= 1.0:
+            test_size = 0.05
+                
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_snv, y, test_size=test_size, random_state=42
+            )
+            X_train_final = X_train
+            y_train_final = y_train
+
+        # Apply SNV to training data
+        if use_augmentation:
+            X_train_snv = apply_snv(X_train_final)
+            X_test_snv = apply_snv(X_test)
+        else:
+            X_train_snv = X_train
+            X_test_snv = X_test
 
         # ============================================
         # MODEL SELECTION SECTION
@@ -1396,60 +1856,64 @@ elif mode == "🚀 Train Model":
         
         with st.spinner(f"Training {model_type.split('(')[0].strip()} model..."):
             
-            # Split data
-            test_size = min(0.2, max(0.05, 1/len(clean_data)))
-            if test_size >= 1.0:
-                test_size = 0.2
-            
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=42
-            )
-            
             # Choose appropriate model
             if "Random Forest" in model_type:
                 # Random Forest doesn't need normalization
-                model = MultiOutputRegressor(
-                    RandomForestRegressor(
-                        n_estimators=model_params.get('n_estimators', 200),
-                        max_depth=model_params.get('max_depth', 15),
-                        min_samples_split=model_params.get('min_samples_split', 5),
-                        min_samples_leaf=model_params.get('min_samples_leaf', 2),
-                        random_state=42,
-                        n_jobs=-1
-                    )
+                if use_augmentation:
+                    X_train_final_rf = X_train_final
+                    X_test_rf = X_test
+                else:
+                    X_train_final_rf = X_train
+                    X_test_rf = X_test
+                
+                # Train Random Forest with MultiOutput
+                base_model = RandomForestRegressor(
+                    n_estimators=model_params.get('n_estimators', 200),
+                    max_depth=model_params.get('max_depth', 15),
+                    min_samples_split=model_params.get('min_samples_split', 5),
+                    min_samples_leaf=model_params.get('min_samples_leaf', 2),
+                    random_state=42,
+                    n_jobs=-1
                 )
-                model.fit(X_train, y_train)
-                X_train_eval = X_train
-                X_test_eval = X_test
+                model = MultiOutputRegressor(base_model)
+                model.fit(X_train_final_rf, y_train_final)
+                
+                # For evaluation
+                X_test_eval = X_test_rf
                 
             elif "XGBoost" in model_type:
                 # XGBoost doesn't need normalization
-                model = MultiOutputRegressor(
-                    XGBRegressor(
-                        n_estimators=model_params.get('n_estimators', 200),
-                        learning_rate=model_params.get('learning_rate', 0.1),
-                        max_depth=model_params.get('max_depth', 6),
-                        subsample=model_params.get('subsample', 0.8),
-                        random_state=42,
-                        n_jobs=-1
-                    )
+                if use_augmentation:
+                    X_train_final_xgb = X_train_final
+                    X_test_xgb = X_test
+                else:
+                    X_train_final_xgb = X_train
+                    X_test_xgb = X_test
+                
+                # Train XGBoost with MultiOutput
+                base_model = XGBRegressor(
+                    n_estimators=model_params.get('n_estimators', 200),
+                    learning_rate=model_params.get('learning_rate', 0.1),
+                    max_depth=model_params.get('max_depth', 6),
+                    subsample=model_params.get('subsample', 0.8),
+                    random_state=42,
+                    n_jobs=-1
                 )
-                model.fit(X_train, y_train)
-                X_train_eval = X_train
-                X_test_eval = X_test
+                model = MultiOutputRegressor(base_model)
+                model.fit(X_train_final_xgb, y_train_final)
                 
-            else:  # PLS - APPLY SNV FOR PLS ONLY
-                n_components = min(15, X_train.shape[0] - 1, X_train.shape[1])
-                n_components = max(1, n_components)
+                # For evaluation
+                X_test_eval = X_test_xgb
                 
-                # Apply SNV normalization for PLS
-                X_train_snv = apply_snv(X_train)
+            else:  # PLS
+                # PLS needs normalization
+                X_train_snv = apply_snv(X_train_final)
                 X_test_snv = apply_snv(X_test)
                 
                 model = PLSRegression(n_components=n_components)
-                model.fit(X_train_snv, y_train)
+                model.fit(X_train_snv, y_train_final)
                 
-                X_train_eval = X_train_snv
+                # For evaluation
                 X_test_eval = X_test_snv
         
         # Model name for display
@@ -1583,12 +2047,14 @@ elif mode == "🚀 Train Model":
             if st.button("💾 Save Model", type="primary", use_container_width=True):
                 dataset_info = {
                     'n_samples': len(clean_data),
+                    'n_augmented_samples': len(X_train_full) - len(clean_data) if use_augmentation else 0,
                     'n_wavelengths': len(wavelength_cols),
                     'targets': existing_targets,
                     'batch_numbers': clean_data['Batch Number'].tolist() if 'Batch Number' in clean_data.columns else [],
                     'created_date': datetime.now().isoformat(),
-                    'model_metrics': metrics_data if metrics_data else [],
-                    'temperature_compensation': temp_comp_info
+                    'augmentation_used': use_augmentation,
+                    'augmentation_factor': augmentation_factor if use_augmentation else 0,
+                    'model_metrics': metrics_data if metrics_data else []
                 }
                 
                 model_path = save_model(model, model_name_input, wavelength_cols, existing_targets, dataset_info, model_type)
@@ -1597,8 +2063,7 @@ elif mode == "🚀 Train Model":
                     'model': model,
                     'wavelengths': wavelength_cols,
                     'target_cols': existing_targets,
-                    'dataset_info': dataset_info,
-                    'temperature_compensation': temp_comp_info
+                    'dataset_info': dataset_info
                 }
                 
                 st.success(f"✅ Model saved as `{model_name_input}`!")
@@ -1640,18 +2105,19 @@ elif mode == "🚀 Train Model":
             - Automatic Batch Number matching
             - Duplicate handling with _scan suffix
             - Missing value imputation
-            - SNV normalization for PLS models
+            - SNV normalization
             
-            **Temperature Compensation:**
-            - Detects water peak shifts
-            - Estimates sample temperature
-            - Corrects spectra during prediction
-            - Prevents negative water activity
+            **Data Augmentation:**
+            - Gaussian noise injection
+            - Wavelength warping
+            - MixUp combinations
+            - Scaling augmentation
+            - Temperature variation simulation
             
             **Model Training:**
-            - PLS regression (with SNV)
-            - Random Forest (no normalization)
-            - XGBoost (no normalization)
+            - PLS regression
+            - Random Forest
+            - XGBoost
             - Automatic train/test split
             - Performance metrics
             """)
@@ -1692,24 +2158,16 @@ elif mode == "🔮 Predict":
                 
                 if not spectrum.empty:
                     if st.session_state.model_data:
-                        # Check if temperature compensation is enabled
-                        temp_comp_enabled = st.session_state.model_data.get('temperature_compensation', {}).get('enabled', False)
-                        
-                        if temp_comp_enabled:
-                            # Use robust prediction with temperature compensation
-                            result_df, correction_info, negative_detected = predict_with_temperature_compensation(
-                                st.session_state.model_data, 
-                                spectrum
-                            )
-                            
-                            if negative_detected:
-                                st.warning("⚠️ Negative water activity detected and corrected")
-                        else:
-                            # Use standard prediction
-                            result_df, _ = predict_with_spectrum(st.session_state.model_data, spectrum)
-                            negative_detected = False
+                        # Use robust prediction with temperature compensation
+                        result_df, correction_info, negative_detected = predict_with_temperature_compensation(
+                            st.session_state.model_data, 
+                            spectrum
+                        )
                         
                         if result_df is not None:
+                            if negative_detected:
+                                st.warning("⚠️ Negative water activity detected and corrected")
+                            
                             st.success(f"✅ Predictions for Batch: {batch_num}")
                             
                             # Display predictions as gauges
@@ -1821,11 +2279,6 @@ elif mode == "📚 Models":
                     with col3:
                         created_date = model_data.get('created_date', '').split('T')[0]
                         st.metric("Created", created_date)
-                    
-                    # Show temperature compensation status
-                    temp_comp = model_data.get('temperature_compensation', {}).get('enabled', False)
-                    if temp_comp:
-                        st.info("🌡️ Temperature Compensation Enabled")
                     
                     if model_data.get('target_cols'):
                         st.markdown("**Target Parameters:**")
